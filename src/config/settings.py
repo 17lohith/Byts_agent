@@ -73,10 +73,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_api_key_present(self) -> "Settings":
-        if self.llm_provider == "openai" and not self.openai_api_key:
-            raise ValueError("OPENAI_API_KEY must be set when LLM_PROVIDER=openai")
-        if self.llm_provider == "anthropic" and not self.anthropic_api_key:
-            raise ValueError("ANTHROPIC_API_KEY must be set when LLM_PROVIDER=anthropic")
+        # LLM is not used in the current flow (Solutions tab replaces it).
+        # Skip API key validation to avoid blocking users who haven't set one.
         return self
 
     @property
