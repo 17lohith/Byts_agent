@@ -1,5 +1,6 @@
-"""LLM-based code solver supporting OpenAI and Anthropic."""
+"""LLM-based code solver — supports OpenAI and Anthropic with retry/backoff."""
 
+import time
 from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -9,6 +10,9 @@ SYSTEM_PROMPT = (
     "When given a LeetCode problem, respond with ONLY the complete solution code — "
     "no explanations, no markdown fences, no extra text."
 )
+
+MAX_API_RETRIES = 3
+API_RETRY_BASE_DELAY = 2  # seconds (doubles each retry)
 
 
 class LLMSolver:
@@ -39,9 +43,19 @@ class LLMSolver:
         )
         logger.info(f"Sending '{title}' to {self.provider} ({self.model})")
 
-        if self.provider == "openai":
-            return self._call_openai(prompt)
-        return self._call_anthropic(prompt)
+        for attempt in range(1, MAX_API_RETRIES + 1):
+            try:
+                if self.provider == "openai":
+                    return self._call_openai(prompt)
+                return self._call_anthropic(prompt)
+            except Exception as e:
+                wait = API_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                if attempt < MAX_API_RETRIES:
+                    logger.warning(f"LLM API error (attempt {attempt}): {e} — retrying in {wait}s")
+                    time.sleep(wait)
+                else:
+                    logger.error(f"LLM API failed after {MAX_API_RETRIES} attempts: {e}")
+                    raise
 
     def _call_openai(self, prompt: str) -> str:
         client = self._get_client()
@@ -53,7 +67,9 @@ class LLMSolver:
             ],
             temperature=self.temperature,
         )
-        return response.choices[0].message.content.strip()
+        result = response.choices[0].message.content.strip()
+        logger.debug(f"OpenAI response: {len(result)} chars")
+        return result
 
     def _call_anthropic(self, prompt: str) -> str:
         client = self._get_client()
@@ -63,4 +79,6 @@ class LLMSolver:
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
-        return message.content[0].text.strip()
+        result = message.content[0].text.strip()
+        logger.debug(f"Anthropic response: {len(result)} chars")
+        return result
