@@ -1,8 +1,10 @@
 """Entry point — BytsOne Automation Bot."""
 
 import sys
+import time
 
 from src.config.settings import settings
+from src.config.constants import COURSE_CLASS, COURSE_TASK
 from src.utils.logger import setup_logger
 from src.browser.manager import BrowserManager
 from src.auth.session import (
@@ -12,22 +14,212 @@ from src.auth.session import (
 )
 from src.bytesone.navigator import BytesOneNavigator
 from src.leetcode.solver import LeetCodeSolver
-from src.ai.solver import LLMSolver
 from src.state.progress import ProgressTracker
-from src.config.constants import LEETCODE_BASE_URL
 
 logger = setup_logger("main")
 
+# ── helpers ────────────────────────────────────────────────────────────────────
+
+def _slugify(title: str) -> str:
+    """Convert a problem title to a URL-style slug for progress tracking."""
+    import re
+    slug = title.lower().strip()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"\s+", "-", slug)
+    return slug
+
+
+def _day_key(day_num: int) -> str:
+    return f"day_{day_num}"
+
+
+def _reauth_leetcode(page, browser):
+    """Re-authenticate LeetCode mid-run."""
+    logger.info("LeetCode session expired — re-authenticating …")
+    ok = ensure_leetcode_login(
+        page=page,
+        leetcode_url="https://leetcode.com/problemset/",
+        email=settings.leetcode_email,
+        login_wait_timeout=settings.login_wait_timeout,
+        first_run=False,
+    )
+    if ok:
+        browser.save_session()
+    return ok
+
+
+# ── core solver loop ───────────────────────────────────────────────────────────
+
+def process_course(
+    course_key: str,
+    bytesone: BytesOneNavigator,
+    leetcode: LeetCodeSolver,
+    progress: ProgressTracker,
+    browser: BrowserManager,
+) -> dict:
+    """
+    Process all 6 days of a single course.
+    Returns summary dict: solved / skipped / failed counts.
+    """
+    page = bytesone.page
+    counts = {"solved": 0, "skipped": 0, "failed": 0}
+
+    logger.info(f"\n{'='*60}")
+    logger.info(f"  Starting course: {course_key.upper()}")
+    logger.info(f"{'='*60}")
+
+    # Open the course from the courses page
+    if not bytesone.open_course(course_key):
+        logger.error(f"Could not open course: {course_key}")
+        return counts
+
+    # Get chapter list (Day 1-6)
+    chapters = bytesone.get_chapters()
+    if not chapters:
+        logger.error("No chapters found — check selectors")
+        return counts
+
+    for chapter in chapters:
+        day_num = chapter["day_num"]
+        day_key = _day_key(day_num)
+        label   = chapter["label"]
+
+        if chapter["locked"]:
+            logger.warning(f"  [{label}] Locked 🔒 — skipping")
+            continue
+
+        logger.info(f"\n  ── {label} ({chapter['progress_pct']}%) ──")
+
+        # Click the day to load its problem list
+        bytesone.click_chapter(chapter)
+
+        # Get problems for this day
+        problems = bytesone.get_problems_in_chapter()
+        if not problems:
+            logger.warning(f"  [{label}] No problems found — skipping")
+            continue
+
+        for prob_idx, problem in enumerate(problems, 1):
+            title      = problem["title"]
+            problem_id = _slugify(title)
+            label_str  = f"[{label} | {prob_idx}/{len(problems)}] {title}"
+
+            # Skip if already tracked in progress.json
+            if progress.is_completed(course_key, day_key, problem_id):
+                logger.info(f"  {label_str} — already done ✅ skipping")
+                counts["skipped"] += 1
+                continue
+
+            logger.info(f"  {label_str} — starting …")
+
+            # Click the problem to open its detail page
+            if not bytesone.click_problem(problem):
+                logger.error(f"  {label_str} — could not open problem")
+                counts["failed"] += 1
+                continue
+
+            # Check if BytsOne already shows it as completed (green check)
+            if problem.get("completed"):
+                logger.info(f"  {label_str} — already completed on BytsOne ✅")
+                progress.mark_completed(course_key, day_key, problem_id)
+                counts["skipped"] += 1
+                continue
+
+            # Click "Take Challenge"
+            if not bytesone.click_take_challenge():
+                logger.error(f"  {label_str} — 'Take Challenge' not found")
+                progress.mark_failed(course_key, day_key, problem_id)
+                counts["failed"] += 1
+                continue
+
+            # Handle the LeetCode contest confirmation dialog
+            bytesone_url_before = page.url
+            if not bytesone.handle_contest_dialog():
+                logger.error(f"  {label_str} — could not confirm contest dialog")
+                progress.mark_failed(course_key, day_key, problem_id)
+                counts["failed"] += 1
+                continue
+
+            # Wait for LeetCode to load (redirect happens after dialog)
+            try:
+                page.wait_for_url("**/leetcode.com/**", timeout=30_000)
+                page.wait_for_load_state("networkidle")
+            except Exception:
+                logger.warning("LeetCode URL wait timed out — checking current URL")
+
+            # Check for login wall
+            if leetcode._is_login_wall():
+                if not _reauth_leetcode(page, browser):
+                    logger.error("Re-auth failed — stopping")
+                    sys.exit(1)
+
+            # Solve the problem using Solutions tab
+            success = leetcode.solve_current_problem()
+
+            if not success:
+                logger.error(f"  {label_str} — failed to solve")
+                progress.mark_failed(course_key, day_key, problem_id)
+                counts["failed"] += 1
+                # Navigate back to BytsOne before continuing
+                _return_to_bytesone(page, bytesone, course_key, bytesone_url_before)
+                continue
+
+            # ── Back to BytsOne: Mark as Complete ──────────────────────────────
+            _return_to_bytesone(page, bytesone, course_key, bytesone_url_before)
+
+            # Click Mark as Complete
+            marked = bytesone.mark_complete()
+            if not marked:
+                logger.warning(f"  {label_str} — 'Mark as Complete' failed (continuing)")
+
+            # Save progress
+            progress.mark_completed(course_key, day_key, problem_id)
+            counts["solved"] += 1
+            logger.info(f"  {label_str} — SOLVED ✅")
+
+            # Click Next Lesson to advance
+            bytesone.click_next_lesson()
+            time.sleep(0.5)
+
+        logger.info(
+            f"  [{label}] done — "
+            f"solved: {counts['solved']}  skipped: {counts['skipped']}  failed: {counts['failed']}"
+        )
+
+        # Re-open the course page so the chapter sidebar is fresh for next day
+        bytesone.open_course(course_key)
+        chapters = bytesone.get_chapters()  # refresh chapter list after re-open
+
+    return counts
+
+
+def _return_to_bytesone(page, bytesone: BytesOneNavigator, course_key: str, fallback_url: str):
+    """Navigate back to BytsOne problem page after LeetCode interaction."""
+    # If we're still on LeetCode, go back
+    if "leetcode.com" in page.url:
+        page.go_back()
+        page.wait_for_load_state("networkidle")
+
+    # If that didn't work, go directly
+    if "leetcode.com" in page.url or "bytsone.com" not in page.url:
+        if fallback_url and "bytsone.com" in fallback_url:
+            page.goto(fallback_url)
+            page.wait_for_load_state("networkidle")
+        else:
+            bytesone.open_course(course_key)
+
+
+# ── main ───────────────────────────────────────────────────────────────────────
 
 def main():
     logger.info("BytsOne Automation Bot starting …")
 
-    # ── validate email config ──────────────────────────────────────────────────
+    # Validate required config
     if not settings.bytesone_email or not settings.leetcode_email:
         logger.error(
-            "BYTESONE_EMAIL and LEETCODE_EMAIL must be set in your .env file.\n"
-            "  BYTESONE_EMAIL = your Karunya institutional email\n"
-            "  LEETCODE_EMAIL = your personal Gmail"
+            "BYTESONE_EMAIL and LEETCODE_EMAIL must be set in .env\n"
+            "  BYTESONE_EMAIL = Karunya institutional email\n"
+            "  LEETCODE_EMAIL = personal Gmail"
         )
         sys.exit(1)
 
@@ -35,122 +227,70 @@ def main():
     if first_run:
         logger.info(
             "\n" + "=" * 60 + "\n"
-            "  FIRST RUN DETECTED\n"
-            "  You will need to log in to both BytsOne and LeetCode\n"
-            "  manually in the browser window that opens.\n"
-            "  BytsOne  → use your Karunya email\n"
-            "  LeetCode → use your personal Gmail\n"
+            "  FIRST RUN — log in to both BytsOne and LeetCode\n"
+            "  BytsOne  → Karunya email\n"
+            "  LeetCode → personal Gmail\n"
             + "=" * 60
         )
 
     progress = ProgressTracker(settings.progress_file)
-    llm = LLMSolver()
 
     with BrowserManager() as browser:
         page = browser.page
 
-        # ── Step 1: BytsOne login ──────────────────────────────────────────────
-        bytesone_ok = ensure_bytesone_login(
+        # ── Auth ───────────────────────────────────────────────────────────────
+        if not ensure_bytesone_login(
             page=page,
             bytesone_url=settings.bytesone_url,
             email=settings.bytesone_email,
             login_wait_timeout=settings.login_wait_timeout,
             first_run=first_run,
-        )
-        if not bytesone_ok:
-            logger.error("Could not log in to BytsOne — aborting")
+        ):
+            logger.error("BytsOne login failed — aborting")
             sys.exit(1)
 
-        # ── Step 2: LeetCode login ─────────────────────────────────────────────
-        leetcode_ok = ensure_leetcode_login(
+        if not ensure_leetcode_login(
             page=page,
-            leetcode_url=f"{LEETCODE_BASE_URL}/problemset/",
+            leetcode_url="https://leetcode.com/problemset/",
             email=settings.leetcode_email,
             login_wait_timeout=settings.login_wait_timeout,
             first_run=first_run,
-        )
-        if not leetcode_ok:
-            logger.error("Could not log in to LeetCode — aborting")
+        ):
+            logger.error("LeetCode login failed — aborting")
             sys.exit(1)
 
-        # ── Step 3: Save session after successful login ────────────────────────
         browser.save_session()
 
-        # ── Step 4: Navigate to course ─────────────────────────────────────────
-        bytesone_nav = BytesOneNavigator(page)
-        if not bytesone_nav.navigate_to_course():
-            logger.error("Failed to open the course. Check COURSE_NAME in .env.")
-            sys.exit(1)
+        # ── Solve ──────────────────────────────────────────────────────────────
+        bytesone = BytesOneNavigator(page)
+        leetcode = LeetCodeSolver(page)
 
-        problems = bytesone_nav.get_problem_links()
-        if not problems:
-            logger.warning("No LeetCode problem links found on the course page.")
-            sys.exit(0)
+        total = {"solved": 0, "skipped": 0, "failed": 0}
 
-        logger.info(f"Processing {len(problems)} problem(s) …")
-
-        # ── Step 5: Solve loop ─────────────────────────────────────────────────
-        leetcode_solver = LeetCodeSolver(page, llm)
-        solved = skipped = failed = 0
-
-        for i, problem in enumerate(problems, 1):
-            url = problem["url"]
-            problem_id = url.rstrip("/").split("/")[-1]
-
-            if progress.is_completed(problem_id):
-                logger.info(f"[{i}/{len(problems)}] Already done — skipping: {problem_id}")
-                skipped += 1
+        for course_key in settings.courses_list:
+            if course_key not in (COURSE_CLASS, COURSE_TASK):
+                logger.warning(f"Unknown course key: {course_key} — skipping")
                 continue
 
-            logger.info(f"[{i}/{len(problems)}] Starting: {problem['title']}")
-            success = leetcode_solver.solve_problem(url)
+            result = process_course(
+                course_key=course_key,
+                bytesone=bytesone,
+                leetcode=leetcode,
+                progress=progress,
+                browser=browser,
+            )
+            for k in total:
+                total[k] += result[k]
 
-            if success:
-                progress.mark_completed(problem_id)
-                # Go back to BytsOne and mark the challenge complete
-                bytesone_nav.navigate_to_course()
-                bytesone_nav.mark_completed()
-                solved += 1
-            else:
-                # Check if this failure was a login wall — re-auth and retry once
-                if _needs_relogin(page):
-                    logger.info("LeetCode login expired mid-run — re-authenticating …")
-                    reauth_ok = ensure_leetcode_login(
-                        page=page,
-                        leetcode_url=f"{LEETCODE_BASE_URL}/problemset/",
-                        email=settings.leetcode_email,
-                        login_wait_timeout=settings.login_wait_timeout,
-                        first_run=False,
-                    )
-                    if reauth_ok:
-                        browser.save_session()
-                        # Retry the current problem once after re-login
-                        success = leetcode_solver.solve_problem(url)
-                        if success:
-                            progress.mark_completed(problem_id)
-                            bytesone_nav.navigate_to_course()
-                            bytesone_nav.mark_completed()
-                            solved += 1
-                            continue
-
-                progress.mark_failed(problem_id)
-                failed += 1
-
-    logger.info(
-        f"\nDone!  Solved: {solved}  |  Skipped: {skipped}  |  Failed: {failed}"
-    )
-
-
-def _needs_relogin(page) -> bool:
-    """Quick check if the current page is a login wall."""
-    from src.config.constants import LEETCODE_SELECTORS
-    for sel in LEETCODE_SELECTORS["login_wall"]:
-        try:
-            page.locator(sel).first.wait_for(state="visible", timeout=3_000)
-            return True
-        except Exception:
-            continue
-    return False
+        # ── Summary ────────────────────────────────────────────────────────────
+        logger.info(
+            f"\n{'='*60}\n"
+            f"  DONE!\n"
+            f"  Solved:  {total['solved']}\n"
+            f"  Skipped: {total['skipped']}\n"
+            f"  Failed:  {total['failed']}\n"
+            f"{'='*60}"
+        )
 
 
 if __name__ == "__main__":

@@ -16,12 +16,19 @@ class Settings(BaseSettings):
     )
 
     # BytsOne Configuration
-    bytesone_url: str = "https://www.bytsone.com/home/dashboard"
-    course_name: str = "Karunya 2028 - Product Fit- Class Problems -(16-2-2026 to 21-2-2026)"
+    bytesone_url: str = "https://www.bytsone.com/home/courses"
+
+    # Which courses to process — comma-separated: "class_problems,task_problems"
+    # Order matters: first listed = processed first
+    courses_order: str = "class_problems,task_problems"
 
     # Account emails — used to pick the right Google account on login
     bytesone_email: str = ""   # Karunya institutional email
     leetcode_email: str = ""   # Personal Gmail
+
+    @property
+    def courses_list(self) -> list:
+        return [c.strip() for c in self.courses_order.split(",") if c.strip()]
 
     # LLM Provider Configuration
     llm_provider: str = "openai"
