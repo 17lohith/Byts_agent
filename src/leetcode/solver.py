@@ -27,10 +27,11 @@ class LeetCodeSolver:
     def solve_current_problem(self) -> bool:
         """
         The bot is already on the LeetCode problem page (redirected from BytsOne).
-        1. Check if already Accepted — skip if so.
-        2. Get best Java solution from Solutions tab.
-        3. Switch editor to Java, inject code, submit.
-        4. Return True on Accepted.
+        1. Get best Java solution from Solutions tab.
+        2. Switch editor to Java, inject code, submit.
+        3. Return True on Accepted.
+        
+        NOTE: Always solves, even if already accepted (force re-submit mode).
         """
         self.page.wait_for_load_state("networkidle")
         self.page.wait_for_timeout(1_500)
@@ -38,10 +39,8 @@ class LeetCodeSolver:
         current_url = self.page.url
         logger.info(f"On LeetCode: {current_url}")
 
-        # Check if already solved
-        if self._is_already_accepted():
-            logger.info("Problem already Accepted — skipping re-submit ✅")
-            return True
+        # NOTE: Removed "already accepted" check - always solve every problem
+        logger.info("Starting solution process (force re-submit mode)...")
 
         # Get solution from Solutions tab
         code = self.scraper.get_best_solution()
