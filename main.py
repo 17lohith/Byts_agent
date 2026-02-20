@@ -94,7 +94,7 @@ def process_course(
         bytesone.click_chapter(chapter)
 
         # Get problems for this day
-        problems = bytesone.get_problems_in_chapter()
+        problems = bytesone.get_problems_in_chapter(day_num)
         if not problems:
             logger.warning(f"  [{label}] No problems found — skipping")
             continue

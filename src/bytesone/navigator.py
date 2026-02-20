@@ -1,17 +1,26 @@
 """BytsOne navigator — courses → chapters → problems → Take Challenge → Mark Complete."""
 
 import time
+import re
 from typing import List, Dict, Optional
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 from src.config.constants import (
-    BYTESONE_COURSES, BYTESONE_CHAPTER, BYTESONE_PROBLEM,
-    BYTESONE_CHALLENGE, COURSE_TITLE_FRAGMENTS,
+    BYTESONE_COURSES, BYTESONE_CHALLENGE, COURSE_TITLE_FRAGMENTS,
     BYTESONE_COURSES_URL, TIMEOUT_SHORT, TIMEOUT_MEDIUM, TIMEOUT_LONG,
 )
 from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+# Known BytsOne global nav items — used to EXCLUDE them from problem lists
+_NAV_ITEMS = {
+    "dashboard", "overall report", "assessments", "contest calendar",
+    "mentoring support", "global platform assessments", "courses",
+    "dsa sheets", "explore", "certificates", "live session", "ide",
+    "ai interview", "ai interview (new)", "resume builder",
+    "gps leaderboard", "log out", "back",
+}
 
 
 class BytesOneNavigator:
@@ -23,48 +32,48 @@ class BytesOneNavigator:
     # ── 1. Courses page ────────────────────────────────────────────────────────
 
     def go_to_courses(self):
-        """Navigate to the BytsOne Courses page."""
-        logger.info("Navigating to Courses page …")
         self.page.goto(BYTESONE_COURSES_URL)
         self.page.wait_for_load_state("networkidle")
 
     def open_course(self, course_key: str) -> bool:
         """
-        Click the correct course card and enter the curriculum view.
-        course_key: 'class_problems' or 'task_problems'
-        Returns True on success.
+        Navigate to the course overview page.
+        Returns True when the course page is loaded.
         """
         fragment = COURSE_TITLE_FRAGMENTS[course_key]
         logger.info(f"Opening course: {fragment}")
         self.go_to_courses()
 
-        # Find the card containing this fragment
+        # Find the course card
         try:
-            card = self.page.locator(f"text={fragment}").first
-            card.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
+            card_text = self.page.locator(f"text={fragment}").first
+            card_text.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
         except PWTimeout:
-            logger.error(f"Course card not found for: {fragment}")
+            logger.error(f"Course card not found: {fragment}")
             return False
 
-        # Click "Continue Learning" inside that card
+        # Find and click Continue Learning inside the same card
+        # Scope to a container that has this fragment text
         try:
-            # Find the card container and click its Continue Learning button
-            card_container = self.page.locator(
-                f"[class*='card']:has-text('{fragment}'), "
-                f"[class*='course']:has-text('{fragment}'), "
-                f"div:has-text('{fragment}')"
-            ).first
-            btn = card_container.locator(
-                "button:has-text('Continue Learning'), a:has-text('Continue Learning')"
+            # Walk up to card container
+            btn = self.page.locator(
+                f"div:has-text('{fragment}') >> button:has-text('Continue Learning')"
             ).first
             btn.wait_for(state="visible", timeout=TIMEOUT_SHORT)
             btn.click()
         except PWTimeout:
-            # Fallback: click the title text itself
-            logger.warning("Could not find Continue Learning button — clicking card title")
-            card.click()
+            try:
+                btn = self.page.locator(
+                    f"div:has-text('{fragment}') >> a:has-text('Continue Learning')"
+                ).first
+                btn.wait_for(state="visible", timeout=TIMEOUT_SHORT)
+                btn.click()
+            except PWTimeout:
+                # Fallback: just click the card title itself
+                card_text.click()
 
         self.page.wait_for_load_state("networkidle")
+        self.page.wait_for_timeout(1_500)
         logger.info(f"Opened course: {fragment} ✅")
         return True
 
@@ -72,93 +81,155 @@ class BytesOneNavigator:
 
     def get_chapters(self) -> List[Dict]:
         """
-        Parse the chapter sidebar and return list of:
-        {
-          "label": "Day 1",
-          "day_num": 1,
-          "locked": False,
-          "completed": False,
-          "progress_pct": 100,
-          "element": <Locator>
-        }
+        Use JavaScript to find the 'Chapters' section and extract Day 1-6 data.
+        Returns list of {label, day_num, locked, completed, progress_pct, element}.
         """
         self.page.wait_for_load_state("networkidle")
         self.page.wait_for_timeout(1_500)
 
+        # Use JavaScript to locate the chapters container based on having
+        # "Chapters" as a header text within the page content area.
+        chapters_data = self.page.evaluate("""
+        () => {
+            // Find the "Chapters" heading (not global nav, specifically course chapters)
+            const allEls = Array.from(document.querySelectorAll('*'));
+
+            // Find element whose DIRECT text is exactly "Chapters"
+            let chaptersHeading = null;
+            for (const el of allEls) {
+                const direct = Array.from(el.childNodes)
+                    .filter(n => n.nodeType === 3)
+                    .map(n => n.textContent.trim())
+                    .join('');
+                if (direct === 'Chapters') {
+                    chaptersHeading = el;
+                    break;
+                }
+            }
+
+            if (!chaptersHeading) return { found: false, container_html: '' };
+
+            // Walk UP to find a container that has multiple "Day N" items
+            let container = chaptersHeading.parentElement;
+            for (let i = 0; i < 6; i++) {
+                if (!container) break;
+                const dayItems = Array.from(container.querySelectorAll('*'))
+                    .filter(el => /^Day\\s+\\d/.test(el.textContent.trim().slice(0, 8)));
+                if (dayItems.length >= 2) break;
+                container = container.parentElement;
+            }
+
+            // Extract unique day entries
+            if (!container) return { found: false, container_html: '' };
+
+            const seen = new Set();
+            const days = [];
+
+            // Find elements whose text STARTS WITH "Day N"
+            const candidates = Array.from(container.querySelectorAll('li, div'))
+                .filter(el => {
+                    const t = el.textContent.trim();
+                    return /^Day\\s+\\d/.test(t.slice(0, 8));
+                });
+
+            for (const el of candidates) {
+                const text = el.textContent.trim();
+                const m = text.match(/Day\\s+(\\d+)/);
+                if (!m) continue;
+                const dayNum = parseInt(m[1]);
+                if (seen.has(dayNum)) continue;
+                seen.add(dayNum);
+
+                // Check locked (look for lock emoji or SVG with lock path)
+                const locked = el.innerHTML.includes('lock') ||
+                               el.textContent.includes('🔒') ||
+                               el.querySelector('[data-icon="lock"]') !== null;
+
+                // Extract progress percentage
+                let pct = 0;
+                const pctMatch = text.match(/(\\d+)%/);
+                if (pctMatch) pct = parseInt(pctMatch[1]);
+
+                days.push({ dayNum, text: text.slice(0, 60), locked, pct });
+            }
+
+            return { found: true, days };
+        }
+        """)
+
+        if not chapters_data.get("found") or not chapters_data.get("days"):
+            logger.error("Could not find 'Chapters' section via JS — falling back to locators")
+            return self._get_chapters_fallback()
+
         chapters = []
+        for d in chapters_data["days"]:
+            day_num = d["dayNum"]
+            label = f"Day {day_num}"
 
-        # Try common chapter/day list selectors
-        selectors_to_try = [
-            "li:has-text('Day')",
-            "[class*='chapter']:has-text('Day')",
-            "[class*='Chapter']:has-text('Day')",
-            "div:has-text('Day 1')",
-        ]
+            # Get a Playwright locator for this specific day row
+            # Use the exact label text to scope, then narrow
+            element = self._locate_chapter_element(day_num)
 
-        rows = []
-        for sel in selectors_to_try:
-            rows = self.page.locator(sel).all()
-            if rows:
-                logger.debug(f"Chapter selector matched: {sel} ({len(rows)} rows)")
-                break
+            chapters.append({
+                "label": label,
+                "day_num": day_num,
+                "locked": d["locked"],
+                "completed": d["pct"] == 100,
+                "progress_pct": d["pct"],
+                "element": element,
+            })
 
-        if not rows:
-            logger.error("No chapter rows found on page")
-            return chapters
+        chapters.sort(key=lambda c: c["day_num"])
+        logger.info(f"Found {len(chapters)} chapter(s): {[c['label'] for c in chapters]}")
+        return chapters
 
+    def _locate_chapter_element(self, day_num: int):
+        """Return a Playwright locator for the chapter row, scoped away from global nav."""
+        # Try precise text match first
+        for sel in [
+            f"li:has-text('Day {day_num}')",
+            f"div:has-text('Day {day_num}')",
+        ]:
+            locs = self.page.locator(sel).all()
+            # Filter to elements that also contain a "%" (progress) or lock icon
+            for loc in locs:
+                try:
+                    t = loc.inner_text(timeout=500)
+                    # Must start with "Day N" and ideally have % or lock
+                    if re.match(rf"^Day\s+{day_num}", t.strip()):
+                        return loc
+                except Exception:
+                    continue
+
+        # Final fallback: just first match
+        return self.page.locator(f"text=Day {day_num}").first
+
+    def _get_chapters_fallback(self) -> List[Dict]:
+        """Fallback: find Day rows by text, deduplicate, filter out nav items."""
+        rows = self.page.locator("li:has-text('Day'), div:has-text('Day')").all()
+        seen = set()
+        chapters = []
         for row in rows:
             try:
                 text = row.inner_text().strip()
-                # Must contain "Day" followed by a number
-                if "Day" not in text:
+                m = re.match(r"^Day\s+(\d+)", text)
+                if not m:
                     continue
-
-                # Extract day number
-                day_num = None
-                for part in text.split():
-                    if part.isdigit():
-                        day_num = int(part)
-                        break
-                if day_num is None:
+                day_num = int(m.group(1))
+                if day_num in seen or day_num > 6:
                     continue
-
-                # Check locked
-                locked = False
-                try:
-                    row.locator(BYTESONE_CHAPTER["lock_icon"]).wait_for(timeout=500)
-                    locked = True
-                except PWTimeout:
-                    pass
-
-                # Extract progress percentage
-                progress_pct = 0
-                if "100%" in text:
-                    progress_pct = 100
-                elif "%" in text:
-                    for part in text.split():
-                        if "%" in part:
-                            try:
-                                progress_pct = int(part.replace("%", ""))
-                            except ValueError:
-                                pass
-
-                completed = progress_pct == 100
-
+                seen.add(day_num)
                 chapters.append({
                     "label": f"Day {day_num}",
                     "day_num": day_num,
-                    "locked": locked,
-                    "completed": completed,
-                    "progress_pct": progress_pct,
+                    "locked": "lock" in row.inner_html().lower(),
+                    "completed": "100%" in text,
+                    "progress_pct": 0,
                     "element": row,
                 })
-
-            except Exception as e:
-                logger.debug(f"Skipped chapter row: {e}")
+            except Exception:
                 continue
-
         chapters.sort(key=lambda c: c["day_num"])
-        logger.info(f"Found {len(chapters)} chapter(s)")
         return chapters
 
     def click_chapter(self, chapter: Dict) -> bool:
@@ -166,7 +237,7 @@ class BytesOneNavigator:
         try:
             chapter["element"].click()
             self.page.wait_for_load_state("networkidle")
-            self.page.wait_for_timeout(1_000)
+            self.page.wait_for_timeout(1_500)
             return True
         except Exception as e:
             logger.error(f"Could not click chapter {chapter['label']}: {e}")
@@ -174,77 +245,144 @@ class BytesOneNavigator:
 
     # ── 3. Problem list (inside a chapter) ────────────────────────────────────
 
-    def get_problems_in_chapter(self) -> List[Dict]:
+    def get_problems_in_chapter(self, day_num: int) -> List[Dict]:
         """
-        Parse problems listed in the right panel after clicking a chapter.
-        Returns list of:
-        {
-          "title": "Two Sum",
-          "problem_id": "two-sum",
-          "completed": False,
-          "element": <Locator>
-        }
+        After clicking a chapter, parse the problem list shown in the right panel.
+        Uses JavaScript to find the content panel (not the global nav).
+        Returns list of {title, problem_id, completed, element}.
         """
-        self.page.wait_for_timeout(1_000)
+        self.page.wait_for_timeout(1_500)
 
-        selectors_to_try = [
-            # Problem rows in the right content panel
-            "[class*='lesson-list'] li",
-            "[class*='LessonList'] li",
-            "[class*='problem-list'] li",
-            "ul[class*='lesson'] li",
-            "ul[class*='problem'] li",
-            # Generic list items that appear to the right of chapters
-            "div[class*='content'] li",
-            "div[class*='curriculum'] li",
-            # Broad fallback: any li that contains a circle/radio icon (problem indicator)
-            "li:has([class*='circle']), li:has(svg)",
-        ]
+        # Use JavaScript to find the problems panel for the currently selected day
+        problems_data = self.page.evaluate(f"""
+        () => {{
+            // The right content panel should have a "Day {day_num}" heading
+            // and a list of problems below it.
+            // Strategy: find elements that look like problem rows (NOT nav items)
 
-        rows = []
-        for sel in selectors_to_try:
-            rows = self.page.locator(sel).all()
-            if len(rows) > 0:
-                logger.debug(f"Problem selector matched: {sel} ({len(rows)} rows)")
-                break
+            const navItems = new Set([
+                'dashboard', 'overall report', 'assessments', 'contest calendar',
+                'mentoring support', 'global platform assessments', 'courses',
+                'dsa sheets', 'explore', 'certificates', 'live session', 'ide',
+                'ai interview', 'ai interview (new)', 'resume builder',
+                'gps leaderboard', 'log out', 'back'
+            ]);
 
+            // Find the Day {day_num} heading in the content area
+            const dayHeadings = Array.from(document.querySelectorAll('h1, h2, h3, h4, div'))
+                .filter(el => {{
+                    const t = el.textContent.trim();
+                    return t.startsWith('{day_num}. Day {day_num}') ||
+                           t === 'Day {day_num}' ||
+                           t.startsWith('Day {day_num}\\n');
+                }});
+
+            if (dayHeadings.length === 0) return {{ found: false }};
+
+            // Take the last one (rightmost / content area)
+            const heading = dayHeadings[dayHeadings.length - 1];
+
+            // Find the container that holds the problems list
+            // Walk up to find a container that has multiple children
+            let container = heading.parentElement;
+            for (let i = 0; i < 5; i++) {{
+                if (!container) break;
+                const children = Array.from(container.children);
+                if (children.length >= 3) break;
+                container = container.parentElement;
+            }}
+
+            if (!container) return {{ found: false }};
+
+            // Find all text items in this container that are not nav items
+            const items = [];
+            const seen = new Set();
+
+            Array.from(container.querySelectorAll('li, a, span, div'))
+                .forEach(el => {{
+                    // Only direct-ish children (max 4 levels deep from container)
+                    let depth = 0, p = el.parentElement;
+                    while (p && p !== container) {{ depth++; p = p.parentElement; }}
+                    if (depth > 4) return;
+
+                    const text = el.textContent.trim().replace(/\\n/g, ' ').replace(/\\s+/g, ' ');
+                    if (!text || text.length < 2 || text.length > 120) return;
+                    if (navItems.has(text.toLowerCase())) return;
+                    if (/^Day\\s+\\d/.test(text)) return; // skip day headers
+                    if (/^\\d+%/.test(text) || text === 'Completed') return; // skip labels
+                    if (seen.has(text)) return;
+                    seen.add(text);
+
+                    const completed = el.innerHTML.includes('check') ||
+                                     el.classList.toString().includes('complete') ||
+                                     el.querySelector('[class*="check"]') !== null;
+
+                    items.push({{ text, completed }});
+                }});
+
+            return {{ found: true, items }};
+        }}
+        """)
+
+        if not problems_data.get("found"):
+            logger.warning(f"JS problem extraction failed for Day {day_num} — trying CSS fallback")
+            return self._get_problems_fallback(day_num)
+
+        items = problems_data.get("items", [])
         problems = []
-        for row in rows:
+        for item in items:
+            title = item["text"].strip()
+            if not title:
+                continue
+            problem_id = re.sub(r"[^a-z0-9\s-]", "", title.lower())
+            problem_id = re.sub(r"\s+", "-", problem_id).strip("-")
+            problems.append({
+                "title": title,
+                "problem_id": problem_id,
+                "completed": item["completed"],
+                "element": self.page.locator(f"text={title}").first,
+            })
+
+        logger.info(f"Found {len(problems)} problem(s) in Day {day_num}")
+        return problems
+
+    def _get_problems_fallback(self, day_num: int) -> List[Dict]:
+        """Fallback: get all visible text items and filter out nav items."""
+        day_header_locs = self.page.locator(
+            f"h1:has-text('Day {day_num}'), h2:has-text('Day {day_num}'), "
+            f"h3:has-text('Day {day_num}'), div:has-text('{day_num}. Day {day_num}')"
+        ).all()
+
+        if not day_header_locs:
+            return []
+
+        # Use the last heading (content area, not sidebar)
+        header = day_header_locs[-1]
+
+        # Get sibling/following elements that are problems
+        problems = []
+        candidate_locs = self.page.locator("li, a[class*='lesson'], a[class*='problem']").all()
+        for loc in candidate_locs:
             try:
-                text = row.inner_text().strip()
-                if not text or len(text) < 2:
+                text = loc.inner_text().strip()
+                if not text or text.lower() in _NAV_ITEMS:
                     continue
-
-                # Skip headers like "Day 1", "Chapters"
-                if text.lower().startswith("day ") and len(text) < 10:
+                if re.match(r"^Day\s+\d", text):
                     continue
-
-                # Check completion (green check icon)
-                completed = False
-                try:
-                    row.locator("[class*='check'], [class*='complete'], [fill='green'], svg[color='green']").wait_for(timeout=300)
-                    completed = True
-                except PWTimeout:
-                    pass
-
-                # problem_id from title slug
-                problem_id = text.lower().strip().replace(" ", "-").replace("'", "")
-
+                problem_id = re.sub(r"[^a-z0-9\s-]", "", text.lower())
+                problem_id = re.sub(r"\s+", "-", problem_id).strip("-")
                 problems.append({
                     "title": text,
                     "problem_id": problem_id,
-                    "completed": completed,
-                    "element": row,
+                    "completed": False,
+                    "element": loc,
                 })
-            except Exception as e:
-                logger.debug(f"Skipped problem row: {e}")
+            except Exception:
                 continue
-
-        logger.info(f"Found {len(problems)} problem(s) in chapter")
         return problems
 
     def click_problem(self, problem: Dict) -> bool:
-        """Click a problem row to open its detail page."""
+        """Click a problem to open its detail page."""
         try:
             problem["element"].click()
             self.page.wait_for_load_state("networkidle")
@@ -257,17 +395,14 @@ class BytesOneNavigator:
     # ── 4. Problem detail: Take Challenge ─────────────────────────────────────
 
     def click_take_challenge(self) -> bool:
-        """
-        Click the 'Take Challenge' button on the problem detail page.
-        Returns True if clicked successfully.
-        """
+        """Click the 'Take Challenge' button on the problem detail page."""
         sel = BYTESONE_CHALLENGE["take_challenge"]
         try:
             btn = self.page.locator(sel).first
             btn.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
             btn.click()
             logger.info("Clicked 'Take Challenge'")
-            self.page.wait_for_timeout(1_500)  # wait for dialog
+            self.page.wait_for_timeout(1_500)
             return True
         except PWTimeout:
             logger.error("'Take Challenge' button not found")
@@ -278,9 +413,8 @@ class BytesOneNavigator:
         Handle the two-step LeetCode Contest confirmation dialog:
           Step 1: username shown + "Continue" button
           Step 2: checkbox + "Start Contest" button
-        Returns True if dialog handled successfully.
         """
-        # Step 1 — "Continue" button (confirms username is correct)
+        # Step 1 — "Continue" button
         try:
             btn = self.page.locator(BYTESONE_CHALLENGE["dialog_continue_btn"]).first
             btn.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
@@ -288,7 +422,7 @@ class BytesOneNavigator:
             logger.debug("Dialog step 1: clicked Continue")
             self.page.wait_for_timeout(1_000)
         except PWTimeout:
-            logger.debug("No 'Continue' dialog step found — skipping to step 2")
+            logger.debug("No 'Continue' dialog — skipping to step 2")
 
         # Step 2 — checkbox + "Start Contest"
         try:
@@ -296,7 +430,6 @@ class BytesOneNavigator:
             checkbox.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
             if not checkbox.is_checked():
                 checkbox.check()
-                logger.debug("Dialog step 2: checkbox checked")
             self.page.wait_for_timeout(500)
 
             start_btn = self.page.locator(BYTESONE_CHALLENGE["dialog_start_btn"]).first
@@ -325,7 +458,7 @@ class BytesOneNavigator:
             return False
 
     def click_next_lesson(self) -> bool:
-        """Click 'Next Lesson' to advance to the next problem."""
+        """Click 'Next Lesson' to advance."""
         sel = BYTESONE_CHALLENGE["next_lesson_btn"]
         try:
             btn = self.page.locator(sel).first
@@ -335,13 +468,8 @@ class BytesOneNavigator:
             logger.debug("Clicked 'Next Lesson'")
             return True
         except PWTimeout:
-            logger.debug("'Next Lesson' not found — may be last problem in chapter")
+            logger.debug("'Next Lesson' not found — may be last problem")
             return False
-
-    # ── helpers ────────────────────────────────────────────────────────────────
 
     def get_current_url(self) -> str:
         return self.page.url
-
-    def wait_for_navigation(self):
-        self.page.wait_for_load_state("networkidle")
