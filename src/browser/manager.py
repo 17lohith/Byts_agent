@@ -46,13 +46,13 @@ class BrowserManager:
             ignore_default_args=["--enable-automation"],
         )
 
-        # If a saved storage state exists, seed the context with it
-        session_path = self.settings.session_file
-        if os.path.exists(session_path):
-            launch_kwargs["storage_state"] = session_path
-            logger.info(f"Loading saved session from {session_path}")
+        # persistent context stores session in user_data_dir automatically —
+        # storage_state is NOT a valid kwarg for launch_persistent_context
+        session_exists = os.path.exists(self.settings.session_file)
+        if session_exists:
+            logger.info("Persistent profile found — existing session will be reused")
         else:
-            logger.info("No saved session found — first-run mode (manual login required)")
+            logger.info("No saved session — first-run mode (manual login required)")
 
         self._context = self._playwright.chromium.launch_persistent_context(
             **launch_kwargs
