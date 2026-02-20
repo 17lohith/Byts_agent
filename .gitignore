@@ -1,28 +1,53 @@
-# Environment
+# Environment & secrets
 .env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
 venv/
 env/
-*.pyc
-__pycache__/
+.venv/
+.env/
 
-# Browser state
+# Browser state & profiles
 storage_state.json
+browser_profile/
 
 # Progress tracking
 progress.json
 
 # Logs
-logs/*.log
+logs/
+*.log
 
-# Screenshots
+# Screenshots / recordings
 screenshots/
+videos/
+playwright-report/
+test-results/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
