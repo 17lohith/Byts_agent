@@ -36,35 +36,40 @@ class BytesOneNavigator:
         self.page.goto(BYTESONE_COURSES_URL)
         self.page.wait_for_load_state("networkidle")
 
-        # Find the card containing this course
-        try:
-            card = self.page.locator(f"text={fragment}").first
-            card.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
-        except PWTimeout:
+        # Find all course cards and filter by exact text match to avoid ancestor issues
+        all_cards = self.page.locator("div").all()
+        target_card = None
+        
+        for card in all_cards:
+            try:
+                text = card.inner_text(timeout=300).strip()
+                # Check if this div contains ONLY our course title (not parent container)
+                if fragment in text and len(text) < len(fragment) + 100:
+                    target_card = card
+                    break
+            except Exception:
+                continue
+        
+        if target_card is None:
             logger.error(f"Course card not found: {fragment}")
             return False
 
         # Click "Continue Learning" scoped to that card
         clicked = False
         for btn_text in ["Continue Learning"]:
-            for sel in [
-                f"div:has-text('{fragment}') >> button:has-text('{btn_text}')",
-                f"div:has-text('{fragment}') >> a:has-text('{btn_text}')",
-            ]:
-                try:
-                    btn = self.page.locator(sel).first
-                    btn.wait_for(state="visible", timeout=TIMEOUT_SHORT)
-                    btn.click()
-                    clicked = True
-                    break
-                except PWTimeout:
-                    continue
-            if clicked:
+            try:
+                # Find button within the card element
+                btn = target_card.locator(f"button:has-text('{btn_text}'), a:has-text('{btn_text}')").first
+                btn.wait_for(state="visible", timeout=TIMEOUT_SHORT)
+                btn.click()
+                clicked = True
                 break
+            except PWTimeout:
+                continue
 
         if not clicked:
-            logger.warning("Continue Learning not found — clicking card title")
-            card.click()
+            logger.warning("Continue Learning not found — clicking card itself")
+            target_card.click()
 
         self.page.wait_for_load_state("networkidle")
         self.page.wait_for_timeout(2_000)
@@ -158,7 +163,7 @@ class BytesOneNavigator:
     # ── 3. Problems ────────────────────────────────────────────────────────────
 
     def get_problems_in_chapter(self, day_num: int) -> List[Dict]:
-        """
+        r"""
         After clicking a chapter, the right panel shows the day's problems.
         KEY: scope search to the container that has the 'N. Day N' heading.
         Problem items have circle indicators (no "%" text, no nav labels).
@@ -240,11 +245,11 @@ class BytesOneNavigator:
 
                 candidates.forEach(el => {
                     const rawText = el.textContent || '';
-                    const text = rawText.trim().replace(/\n/g, ' ').replace(/\s+/g, ' ');
+                    const text = rawText.trim().replace(/\\n/g, ' ').replace(/\\s+/g, ' ');
 
                     if (!text || text.length < 3 || text.length > 120) return;
-                    if (/^Day\s+\d/.test(text)) return;     // skip day headers
-                    if (/\d+%/.test(text)) return;           // skip progress %
+                    if (/^Day\\s+\\d/.test(text)) return;     // skip day headers
+                    if (/\\d+%/.test(text)) return;           // skip progress %
                     if (_NAV.has(text.toLowerCase())) return; // skip nav labels
                     if (seen.has(text)) return;
                     seen.add(text);

@@ -11,6 +11,17 @@ BYTESONE_COURSES = {
     "continue_learning_btn": "button:has-text('Continue Learning'), a:has-text('Continue Learning')",
 }
 
+# ── BytsOne: Selectors for auth flow ────────────────────────────────────────────
+
+BYTESONE_SELECTORS = {
+    "google_signin_btn": [
+        "button:has-text('Sign in with Google')",
+        "a:has-text('Sign in with Google')",
+        "button:has-text('Continue with Google')",
+        "a:has-text('Continue with Google')",
+    ]
+}
+
 # ── BytsOne: Course curriculum (chapter list) ───────────────────────────────────
 
 BYTESONE_CHAPTER = {
@@ -65,6 +76,17 @@ LEETCODE_PROBLEM = {
     "login_wall":       ["text=Sign in", "a[href*='/accounts/login']"],
     # Already accepted badge (skip re-submit)
     "accepted_badge":   ["text=Accepted", "[class*='accepted']", "[data-e2e-locator='submission-result']:has-text('Accepted')"],
+}
+
+# ── LeetCode: Selectors for auth flow ──────────────────────────────────────────
+
+LEETCODE_SELECTORS = {
+    "google_signin_btn": [
+        "button:has-text('Sign in with Google')",
+        "a:has-text('Sign in with Google')",
+        "button:has-text('Continue with Google')",
+        "a:has-text('Continue with Google')",
+    ]
 }
 
 # ── LeetCode: Solutions tab ─────────────────────────────────────────────────────
