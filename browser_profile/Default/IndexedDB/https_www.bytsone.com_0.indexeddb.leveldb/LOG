@@ -1,0 +1,4 @@
+2026/02/20-00:12:13.746 63ffb Reusing MANIFEST /Users/lohithkrm/projects/Bytes_bot/browser_profile/Default/IndexedDB/https_www.bytsone.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/02/20-00:12:13.746 63ffb Recovering log #4
+2026/02/20-00:12:13.747 63ffb Reusing old log /Users/lohithkrm/projects/Bytes_bot/browser_profile/Default/IndexedDB/https_www.bytsone.com_0.indexeddb.leveldb/000004.log 
+2026/02/20-00:12:13.777 63ffe Manual compaction at level-0 from '\x00\x04\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x05\x00\x00\x00' @ 0 : 0; will stop at (end)
