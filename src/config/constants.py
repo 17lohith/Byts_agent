@@ -51,6 +51,8 @@ BYTESONE_PROBLEM = {
 # ── BytsOne: Problem detail page ────────────────────────────────────────────────
 
 BYTESONE_CHALLENGE = {
+    # "Activate" button (appears for new/unattempted problems)
+    "activate_btn":       "button:has-text('Activate'), a:has-text('Activate')",
     # "Take Challenge" button on the problem detail card
     "take_challenge":     "button:has-text('Take Challenge'), a:has-text('Take Challenge')",
     # Confirmation dialog elements

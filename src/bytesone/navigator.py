@@ -236,6 +236,7 @@ class BytesOneNavigator:
                     'mentoring support','global platform assessments','courses',
                     'dsa sheets','explore','certificates','live session','ide',
                     'ai interview','resume builder','gps leaderboard','log out','back',
+                    'completed',  // Filter out the "Completed" status item
                 ]);
 
                 // Try li first, then divs with item/lesson/problem class
@@ -306,7 +307,7 @@ class BytesOneNavigator:
             "mentoring support", "global platform assessments", "courses",
             "dsa sheets", "explore", "certificates", "live session", "ide",
             "ai interview", "ai interview (new)", "resume builder",
-            "gps leaderboard", "log out", "back",
+            "gps leaderboard", "log out", "back", "completed",
         }
         results = []
         seen = set()
@@ -343,6 +344,31 @@ class BytesOneNavigator:
 
     # ── 4. Take Challenge ──────────────────────────────────────────────────────
 
+    def click_activate(self) -> bool:
+        """
+        Click the 'Activate' button if present (for new/unattempted problems).
+        Returns True if clicked or if button not found (already activated).
+        """
+        activate_selectors = [
+            "button:has-text('Activate')",
+            "a:has-text('Activate')",
+            "[class*='activate']",
+        ]
+        
+        for sel in activate_selectors:
+            try:
+                btn = self.page.locator(sel).first
+                btn.wait_for(state="visible", timeout=TIMEOUT_SHORT)
+                btn.click()
+                logger.info("Clicked 'Activate' ✅")
+                self.page.wait_for_timeout(2_000)  # Wait for activation to complete
+                return True
+            except PWTimeout:
+                continue
+        
+        logger.debug("'Activate' button not found — problem may already be activated")
+        return True  # Not an error - just already activated
+
     def click_take_challenge(self) -> bool:
         """Click the 'Take Challenge' button. Saves URL so we can return later."""
         self._current_problem_url = self.page.url   # save for return trip
@@ -361,35 +387,84 @@ class BytesOneNavigator:
     def handle_contest_dialog(self) -> bool:
         """
         Auto-confirm the LeetCode Contest dialog:
-          Step 1: 'Continue' button (confirm username)
+          Step 1: 'Continue' button (confirm username)  
           Step 2: checkbox + 'Start Contest'
         """
-        # Step 1 — Continue
+        # Wait for dialog to appear
+        self.page.wait_for_timeout(2_000)
+        
+        # Step 1 — Continue (username confirmation)
         try:
             btn = self.page.locator(BYTESONE_CHALLENGE["dialog_continue_btn"]).first
             btn.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
             btn.click()
             logger.debug("Dialog step 1: Continue clicked")
-            self.page.wait_for_timeout(1_000)
+            self.page.wait_for_timeout(1_500)
         except PWTimeout:
             logger.debug("No Continue button — skipping to step 2")
 
         # Step 2 — checkbox + Start Contest
-        try:
-            cb = self.page.locator(BYTESONE_CHALLENGE["dialog_checkbox"]).first
-            cb.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
-            if not cb.is_checked():
-                cb.check()
-            self.page.wait_for_timeout(400)
+        # Try multiple strategies for the checkbox
+        checkbox_checked = False
+        
+        # Strategy 1: Find checkbox by type
+        checkbox_selectors = [
+            "input[type='checkbox']",
+            "input[type='checkbox'][id]",
+            "[role='checkbox']",
+            "div[role='checkbox']",
+            "span:has(input[type='checkbox'])",
+        ]
+        
+        for sel in checkbox_selectors:
+            try:
+                cb = self.page.locator(sel).first
+                cb.wait_for(state="visible", timeout=TIMEOUT_SHORT)
+                
+                # Check if it's already checked
+                is_checked = False
+                try:
+                    is_checked = cb.is_checked()
+                except:
+                    # If is_checked() fails, try clicking anyway
+                    pass
+                
+                if not is_checked:
+                    cb.click()
+                    logger.debug(f"Checkbox clicked: {sel}")
+                else:
+                    logger.debug(f"Checkbox already checked: {sel}")
+                
+                checkbox_checked = True
+                self.page.wait_for_timeout(800)
+                break
+            except PWTimeout:
+                continue
+        
+        if not checkbox_checked:
+            logger.warning("Could not find/check the checkbox — trying Start button anyway")
 
-            start = self.page.locator(BYTESONE_CHALLENGE["dialog_start_btn"]).first
-            start.wait_for(state="visible", timeout=TIMEOUT_SHORT)
-            start.click()
-            logger.info("Contest dialog confirmed ✅")
-            return True
-        except PWTimeout:
-            logger.error("'Start Contest' button not found")
-            return False
+        # Click Start Contest button
+        start_selectors = [
+            "button:has-text('Start Contest')",
+            "button:has-text('Start')",
+            "a:has-text('Start Contest')",
+            "[type='submit']:has-text('Start')",
+        ]
+        
+        for sel in start_selectors:
+            try:
+                start = self.page.locator(sel).first
+                start.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
+                start.click()
+                logger.info("Contest dialog confirmed ✅")
+                self.page.wait_for_timeout(1_500)
+                return True
+            except PWTimeout:
+                continue
+        
+        logger.error("'Start Contest' button not found")
+        return False
 
     # ── 5. Return to BytsOne after LeetCode ────────────────────────────────────
 

@@ -125,6 +125,13 @@ def process_course(
                 counts["skipped"] += 1
                 continue
 
+            # Click "Activate" if present (for new problems)
+            if not bytesone.click_activate():
+                logger.error(f"  {label_str} — could not activate problem")
+                progress.mark_failed(course_key, day_key, problem_id)
+                counts["failed"] += 1
+                continue
+
             # Click "Take Challenge"
             if not bytesone.click_take_challenge():
                 logger.error(f"  {label_str} — 'Take Challenge' not found")
@@ -140,16 +147,38 @@ def process_course(
                 counts["failed"] += 1
                 continue
 
-            # Wait for LeetCode to load (redirect happens after dialog)
-            try:
-                page.wait_for_url("**/leetcode.com/**", timeout=30_000)
-                page.wait_for_load_state("networkidle")
-            except Exception:
-                logger.warning("LeetCode URL wait timed out — checking current URL")
+            # Wait for LeetCode to open in NEW TAB
+            logger.info("Waiting for LeetCode tab to open...")
+            page.wait_for_timeout(3_000)
+            
+            # Switch to LeetCode tab
+            leetcode_page = None
+            context = browser._context
+            pages = context.pages
+            
+            for p in pages:
+                if "leetcode.com" in p.url:
+                    leetcode_page = p
+                    logger.info(f"Found LeetCode tab: {p.url}")
+                    break
+            
+            if leetcode_page is None:
+                logger.error("Could not find LeetCode tab — contest may not have opened")
+                progress.mark_failed(course_key, day_key, problem_id)
+                counts["failed"] += 1
+                continue
+            
+            # Update page reference to LeetCode tab
+            old_page = page
+            page = leetcode_page
+            leetcode.page = leetcode_page  # Update solver's page reference
+            
+            page.wait_for_load_state("networkidle")
+            logger.info(f"Switched to LeetCode tab: {page.url}")
 
-            # Check for login wall
+            # Check for login wall on LeetCode tab
             if leetcode._is_login_wall():
-                if not _reauth_leetcode(page, browser):
+                if not _reauth_leetcode(leetcode_page, browser):
                     logger.error("Re-auth failed — stopping")
                     sys.exit(1)
 
@@ -160,12 +189,29 @@ def process_course(
                 logger.error(f"  {label_str} — failed to solve")
                 progress.mark_failed(course_key, day_key, problem_id)
                 counts["failed"] += 1
-                # Navigate back to BytsOne before continuing
-                _return_to_bytesone(page, bytesone, course_key, bytesone_url_before)
+                # Close LeetCode tab and switch back to BytsOne
+                leetcode_page.close()
+                page = old_page
+                bytesone.page = old_page
+                leetcode.page = old_page
                 continue
 
             # ── Back to BytsOne: Mark as Complete ──────────────────────────────
-            _return_to_bytesone(page, bytesone, course_key, bytesone_url_before)
+            # Close LeetCode tab
+            leetcode_page.close()
+            logger.info("Closed LeetCode tab, returning to BytsOne")
+            
+            # Switch back to BytsOne tab
+            page = old_page
+            bytesone.page = old_page
+            leetcode.page = old_page
+            
+            # Navigate back to problem page
+            if bytesone_url_before and "bytsone.com" in bytesone_url_before:
+                page.goto(bytesone_url_before)
+                page.wait_for_load_state("networkidle")
+            else:
+                bytesone.open_course(course_key)
 
             # Click Mark as Complete
             marked = bytesone.mark_complete()
