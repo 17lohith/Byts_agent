@@ -189,12 +189,20 @@ class LeetCodeSolutionScraper:
                 """() => {
                     if (typeof monaco !== 'undefined') {
                         const models = monaco.editor.getModels();
-                        if (models && models.length > 0) return models[0].getValue();
+                        if (models && models.length > 0) {
+                            // Pick the largest model — solution pages may have the
+                            // problem stub in model[0] and the actual solution elsewhere.
+                            const vals = models.map(m => m.getValue()).filter(v => v);
+                            if (vals.length > 0) {
+                                return vals.reduce((a, b) => a.length > b.length ? a : b);
+                            }
+                        }
                     }
                     return null;
                 }"""
             )
-            if code and len(code) > 20:
+            # Require >150 chars to reject default empty stubs (~80-100 chars)
+            if code and len(code) > 150:
                 logger.info(f"Extracted code via Monaco JS ({len(code)} chars) ✅")
                 return code
         except Exception:

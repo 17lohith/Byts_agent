@@ -281,8 +281,48 @@ class LeetCodeSolver:
         """
         Click the language picker button to open the dropdown, then click Java.
         Returns True if Java option was clicked.
+
+        Strategy 0 (primary): pure JS — find any button whose exact text is a known
+        language name, click it, then click the Java option.  This is immune to
+        selector churn caused by LeetCode UI updates.
+
+        Strategy 1 (fallback): Playwright locator-based approach.
         """
-        # Selectors for the language dropdown trigger button
+        # ── Strategy 0: JavaScript-driven click ────────────────────────────────
+        try:
+            opened = self.page.evaluate(
+                """() => {
+                    const LANGS = new Set([
+                        'C++','Python3','Python','JavaScript','TypeScript',
+                        'Java','Go','Ruby','Swift','Kotlin','Rust','Scala','PHP','C#','C'
+                    ]);
+                    const btns = Array.from(document.querySelectorAll('button'));
+                    const langBtn = btns.find(b => LANGS.has(b.textContent.trim()));
+                    if (langBtn) { langBtn.click(); return true; }
+                    return false;
+                }"""
+            )
+            if opened:
+                self.page.wait_for_timeout(800)
+                java_clicked = self.page.evaluate(
+                    """() => {
+                        // [role='option'] for headlessui dropdowns; li for older ones
+                        const candidates = Array.from(
+                            document.querySelectorAll('[role="option"], li[data-value], ul li')
+                        );
+                        const javaOpt = candidates.find(o => o.textContent.trim() === 'Java');
+                        if (javaOpt) { javaOpt.click(); return true; }
+                        return false;
+                    }"""
+                )
+                if java_clicked:
+                    logger.debug("Switched to Java via JS strategy ✅")
+                    return True
+                logger.debug("JS opened dropdown but Java option not found — falling back")
+        except Exception as e:
+            logger.debug(f"JS language switch failed: {e}")
+
+        # ── Strategy 1: Playwright locators (fallback) ──────────────────────────
         dropdown_trigger_selectors = [
             "button[id^='headlessui-listbox-button']",
             "[class*='lang-select'] button",
@@ -291,6 +331,12 @@ class LeetCodeSolver:
             "button[aria-haspopup='true']",
         ]
 
+        # Language names for button-text matching — use exact words, not substrings
+        # ('c' alone would match 'Cancel', 'Accept', etc.)
+        EXACT_LANGS = {"c++", "java", "python3", "python", "javascript",
+                       "typescript", "go", "ruby", "swift", "kotlin", "rust",
+                       "scala", "php", "c#"}
+
         opened = False
         for sel in dropdown_trigger_selectors:
             try:
@@ -298,8 +344,7 @@ class LeetCodeSolver:
                 for btn in btns:
                     try:
                         txt = btn.inner_text(timeout=400).strip().lower()
-                        # Must be a language button, not Submit/Run
-                        if any(lang in txt for lang in ["c++", "java", "python", "c", "go", "ruby", "swift"]):
+                        if txt in EXACT_LANGS:
                             btn.click()
                             self.page.wait_for_timeout(600)
                             opened = True
@@ -314,39 +359,20 @@ class LeetCodeSolver:
         if not opened:
             return False
 
-        # Now pick Java from the opened dropdown
-        java_option_selectors = [
-            # Exact match first to avoid matching "JavaScript"
-            "li[role='option']:has-text('Java')",
-            "[role='option']:has-text('Java')",
-            "li:has-text('Java')",
-        ]
-        for sel in java_option_selectors:
+        # Pick Java from the opened dropdown — exact text match only
+        for sel in ["li[role='option']", "[role='option']", "li"]:
             try:
-                # Filter strictly: text must be exactly "Java" not "JavaScript"
                 opts = self.page.locator(sel).all()
                 for opt in opts:
                     try:
-                        txt = opt.inner_text(timeout=400).strip()
-                        if txt.lower() == "java":  # exact match only
+                        if opt.inner_text(timeout=400).strip() == "Java":
                             opt.click()
-                            logger.debug(f"Clicked Java option in dropdown ✅")
+                            logger.debug("Clicked Java option in dropdown ✅")
                             return True
                     except Exception:
                         continue
             except Exception:
                 continue
-
-        # Fallback: use keyboard — type "Java" in the dropdown search if it has one
-        try:
-            self.page.keyboard.type("Java")
-            self.page.wait_for_timeout(300)
-            java_opt = self.page.locator("[role='option']:has-text('Java')").first
-            java_opt.wait_for(state="visible", timeout=TIMEOUT_SHORT)
-            java_opt.click()
-            return True
-        except Exception:
-            pass
 
         logger.warning("Java option not found in the language dropdown")
         return False

@@ -344,8 +344,9 @@ class BytesOneNavigator:
         try:
             problem["element"].click()
             self.page.wait_for_load_state("load")
-            self.page.wait_for_timeout(1_000)
-            logger.debug(f"Opened problem: {problem['title']}  URL: {self.page.url}")
+            # Give the React SPA extra time to render the problem detail panel
+            self.page.wait_for_timeout(2_500)
+            logger.info(f"Opened problem: {problem['title']}  URL: {self.page.url}")
             return True
         except Exception as e:
             logger.error(f"Could not click problem '{problem['title']}': {e}")
@@ -381,17 +382,44 @@ class BytesOneNavigator:
     def click_take_challenge(self) -> bool:
         """Click the 'Take Challenge' button. Saves URL so we can return later."""
         self._current_problem_url = self.page.url   # save for return trip
-        sel = BYTESONE_CHALLENGE["take_challenge"]
+
+        # Scroll down to ensure the button is in view (some pages hide it below fold)
         try:
-            btn = self.page.locator(sel).first
-            btn.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
-            btn.click()
-            logger.info("Clicked 'Take Challenge'")
-            self.page.wait_for_timeout(1_500)
-            return True
-        except PWTimeout:
+            self.page.evaluate("window.scrollBy(0, 300)")
+            self.page.wait_for_timeout(500)
+        except Exception:
+            pass
+
+        # Try multiple button text variants — BytsOne uses different labels per course
+        challenge_selectors = [
+            "button:has-text('Take Challenge')",
+            "a:has-text('Take Challenge')",
+            "button:has-text('Start Challenge')",
+            "a:has-text('Start Challenge')",
+            "button:has-text('Go to Challenge')",
+            "button:has-text('Solve')",
+        ]
+
+        for sel in challenge_selectors:
+            try:
+                btn = self.page.locator(sel).first
+                btn.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
+                btn.click()
+                logger.info(f"Clicked 'Take Challenge' (selector: {sel})")
+                self.page.wait_for_timeout(1_500)
+                return True
+            except PWTimeout:
+                continue
+
+        # Last resort: dump visible buttons to help diagnose
+        try:
+            btn_texts = self.page.evaluate(
+                "() => Array.from(document.querySelectorAll('button,a')).map(b => b.textContent.trim()).filter(t => t && t.length < 50)"
+            )
+            logger.error(f"'Take Challenge' button not found. Visible buttons/links: {btn_texts[:20]}")
+        except Exception:
             logger.error("'Take Challenge' button not found")
-            return False
+        return False
 
     def handle_contest_dialog(self) -> bool:
         """
@@ -492,18 +520,39 @@ class BytesOneNavigator:
     # ── 6. Completion ──────────────────────────────────────────────────────────
 
     def mark_complete(self) -> bool:
-        """Click 'Mark as Complete'."""
+        """Click 'Mark as Complete', then confirm the Completion Verification dialog."""
         sel = BYTESONE_CHALLENGE["mark_complete_btn"]
         try:
             btn = self.page.locator(sel).first
             btn.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
             btn.click()
-            logger.info("Marked as Complete ✅")
-            self.page.wait_for_timeout(1_000)
-            return True
+            logger.info("Clicked 'Mark as Complete'")
+            self.page.wait_for_timeout(1_500)
         except PWTimeout:
             logger.warning("'Mark as Complete' not found")
             return False
+
+        # Handle the "Completion Verification" confirmation dialog
+        confirm_selectors = [
+            "button:has-text('Confirm Completion')",
+            "button:has-text('Confirm')",
+            "a:has-text('Confirm Completion')",
+            "[role='dialog'] button:has-text('Confirm')",
+        ]
+        for sel in confirm_selectors:
+            try:
+                confirm_btn = self.page.locator(sel).first
+                confirm_btn.wait_for(state="visible", timeout=TIMEOUT_SHORT)
+                confirm_btn.click()
+                logger.info("Marked as Complete ✅")
+                self.page.wait_for_timeout(1_000)
+                return True
+            except PWTimeout:
+                continue
+
+        # No confirmation dialog — treat original click as success
+        logger.info("Marked as Complete ✅ (no confirmation dialog)")
+        return True
 
     def click_next_lesson(self) -> bool:
         """Click 'Next Lesson'."""
