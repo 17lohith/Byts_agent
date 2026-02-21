@@ -31,7 +31,7 @@ class Settings(BaseSettings):
         return [c.strip() for c in self.courses_order.split(",") if c.strip()]
 
     # LLM Provider Configuration
-    llm_provider: str = "openai"
+    llm_provider: str = "openrouter"
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
 
@@ -42,6 +42,14 @@ class Settings(BaseSettings):
     # Anthropic Settings
     anthropic_model: str = "claude-3-5-sonnet-20241022"
     anthropic_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+
+    # OpenRouter Settings (used as default LLM provider)
+    openrouter_api_key: str = ""
+    openrouter_model: str = "minimax/minimax-m2.5"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    # Max AI debug cycles per problem before giving up
+    ai_max_debug_cycles: int = Field(default=3, gt=0)
 
     # Browser Settings
     slow_mo: int = Field(default=100, ge=0)
@@ -66,7 +74,7 @@ class Settings(BaseSettings):
     @field_validator("llm_provider")
     @classmethod
     def validate_llm_provider(cls, v: str) -> str:
-        allowed = {"openai", "anthropic"}
+        allowed = {"openai", "anthropic", "openrouter"}
         if v not in allowed:
             raise ValueError(f"llm_provider must be one of {allowed}, got '{v}'")
         return v
@@ -79,18 +87,24 @@ class Settings(BaseSettings):
 
     @property
     def llm_api_key(self) -> Optional[str]:
+        if self.llm_provider == "openrouter":
+            return self.openrouter_api_key
         if self.llm_provider == "openai":
             return self.openai_api_key
         return self.anthropic_api_key
 
     @property
     def llm_model(self) -> str:
+        if self.llm_provider == "openrouter":
+            return self.openrouter_model
         if self.llm_provider == "openai":
             return self.openai_model
         return self.anthropic_model
 
     @property
     def llm_temperature(self) -> float:
+        if self.llm_provider == "openrouter":
+            return self.openrouter_temperature
         if self.llm_provider == "openai":
             return self.openai_temperature
         return self.anthropic_temperature

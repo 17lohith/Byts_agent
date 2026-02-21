@@ -147,19 +147,16 @@ def process_course(
                 counts["failed"] += 1
                 continue
 
-            # Wait for LeetCode to open in NEW TAB
+            # Wait for LeetCode to open in NEW TAB (poll with retries)
             logger.info("Waiting for LeetCode tab to open...")
-            page.wait_for_timeout(3_000)
-            
-            # Switch to LeetCode tab
             leetcode_page = None
-            context = browser._context
-            pages = context.pages
-            
-            for p in pages:
-                if "leetcode.com" in p.url:
-                    leetcode_page = p
-                    logger.info(f"Found LeetCode tab: {p.url}")
+            for _attempt in range(20):  # poll up to 10 seconds (20 × 500ms)
+                page.wait_for_timeout(500)
+                for p in browser._context.pages:
+                    if "leetcode.com" in p.url and p.url != "about:blank":
+                        leetcode_page = p
+                        break
+                if leetcode_page:
                     break
             
             if leetcode_page is None:
@@ -173,7 +170,7 @@ def process_course(
             page = leetcode_page
             leetcode.page = leetcode_page  # Update solver's page reference
             
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("load")
             logger.info(f"Switched to LeetCode tab: {page.url}")
 
             # Check for login wall on LeetCode tab
@@ -209,7 +206,7 @@ def process_course(
             # Navigate back to problem page
             if bytesone_url_before and "bytsone.com" in bytesone_url_before:
                 page.goto(bytesone_url_before)
-                page.wait_for_load_state("networkidle")
+                page.wait_for_load_state("load")
             else:
                 bytesone.open_course(course_key)
 
@@ -244,13 +241,13 @@ def _return_to_bytesone(page, bytesone: BytesOneNavigator, course_key: str, fall
     # If we're still on LeetCode, go back
     if "leetcode.com" in page.url:
         page.go_back()
-        page.wait_for_load_state("networkidle")
+        page.wait_for_load_state("load")
 
     # If that didn't work, go directly
     if "leetcode.com" in page.url or "bytsone.com" not in page.url:
         if fallback_url and "bytsone.com" in fallback_url:
             page.goto(fallback_url)
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("load")
         else:
             bytesone.open_course(course_key)
 

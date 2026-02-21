@@ -34,16 +34,27 @@ class BytesOneNavigator:
         logger.info(f"Opening course: {fragment}")
 
         self.page.goto(BYTESONE_COURSES_URL)
-        self.page.wait_for_load_state("networkidle")
+        self.page.wait_for_load_state("load")
 
-        # Find all course cards and filter by exact text match to avoid ancestor issues
+        # BytsOne is a React SPA — content renders after the load event.
+        # Wait for at least one "Continue Learning" button to appear before scanning.
+        try:
+            self.page.wait_for_selector(
+                "button:has-text('Continue Learning'), a:has-text('Continue Learning')",
+                timeout=15_000,
+            )
+        except PWTimeout:
+            logger.warning("Course cards slow to render — waiting extra 3s")
+            self.page.wait_for_timeout(3_000)
+
+        # Find all course cards and filter by text match
         all_cards = self.page.locator("div").all()
         target_card = None
         
         for card in all_cards:
             try:
                 text = card.inner_text(timeout=300).strip()
-                # Check if this div contains ONLY our course title (not parent container)
+                # Match cards that contain our fragment but aren't giant ancestor divs
                 if fragment in text and len(text) < len(fragment) + 100:
                     target_card = card
                     break
@@ -56,9 +67,8 @@ class BytesOneNavigator:
 
         # Click "Continue Learning" scoped to that card
         clicked = False
-        for btn_text in ["Continue Learning"]:
+        for btn_text in ["Continue Learning", "Start Learning", "Start"]:
             try:
-                # Find button within the card element
                 btn = target_card.locator(f"button:has-text('{btn_text}'), a:has-text('{btn_text}')").first
                 btn.wait_for(state="visible", timeout=TIMEOUT_SHORT)
                 btn.click()
@@ -71,7 +81,7 @@ class BytesOneNavigator:
             logger.warning("Continue Learning not found — clicking card itself")
             target_card.click()
 
-        self.page.wait_for_load_state("networkidle")
+        self.page.wait_for_load_state("load")
         self.page.wait_for_timeout(2_000)
         final_url = self.page.url
         logger.info(f"Opened course: {fragment} ✅  URL: {final_url}")
@@ -87,18 +97,17 @@ class BytesOneNavigator:
 
     def get_chapters(self) -> List[Dict]:
         """
-        KEY INSIGHT: Chapter rows always contain a "%" (progress) or a lock icon.
-        Global nav items (Dashboard, Overall Report…) NEVER contain "%".
-        So we filter on that to get only the real Day 1-6 entries.
+        Chapter rows always contain a "%" (progress) or a lock icon.
+        Use a scoped selector instead of scanning every element on the page.
         """
-        self.page.wait_for_load_state("networkidle")
-        self.page.wait_for_timeout(1_500)
+        self.page.wait_for_load_state("load")
+        self.page.wait_for_timeout(2_000)  # give SPA time to render sidebar
 
         seen_days = set()
         chapters = []
 
-        # Get all elements that start with "Day N" text
-        candidates = self.page.locator("*").all()
+        # Scope to elements whose text starts with "Day " — much faster than locator("*")
+        candidates = self.page.locator("*:has-text('Day ')").all()
         for el in candidates:
             try:
                 text = el.inner_text(timeout=300).strip()
@@ -153,7 +162,7 @@ class BytesOneNavigator:
         """Click a day chapter. Returns True on success."""
         try:
             chapter["element"].click()
-            self.page.wait_for_load_state("networkidle")
+            self.page.wait_for_load_state("load")
             self.page.wait_for_timeout(1_500)
             return True
         except Exception as e:
@@ -334,7 +343,7 @@ class BytesOneNavigator:
         self._current_problem_url = self.page.url
         try:
             problem["element"].click()
-            self.page.wait_for_load_state("networkidle")
+            self.page.wait_for_load_state("load")
             self.page.wait_for_timeout(1_000)
             logger.debug(f"Opened problem: {problem['title']}  URL: {self.page.url}")
             return True
@@ -476,7 +485,7 @@ class BytesOneNavigator:
             return False
         logger.debug(f"Returning to BytsOne: {url}")
         self.page.goto(url)
-        self.page.wait_for_load_state("networkidle")
+        self.page.wait_for_load_state("load")
         self.page.wait_for_timeout(1_000)
         return True
 
@@ -503,7 +512,7 @@ class BytesOneNavigator:
             btn = self.page.locator(sel).first
             btn.wait_for(state="visible", timeout=TIMEOUT_SHORT)
             btn.click()
-            self.page.wait_for_load_state("networkidle")
+            self.page.wait_for_load_state("load")
             logger.debug("Next Lesson clicked")
             return True
         except PWTimeout:
