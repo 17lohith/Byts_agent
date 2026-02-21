@@ -24,25 +24,118 @@ class LeetCodeSolutionScraper:
 
     def get_best_solution(self) -> Optional[str]:
         """
-        On the current LeetCode problem page, navigate to the Solutions tab,
-        find the most upvoted Java solution, open it, and return the code.
-        Returns None if no Java solution is found.
+        Navigate to Solutions page, apply Java filter, then iterate through
+        solutions starting from the 2nd one until valid Java code is found.
+        Returns None if no Java solution could be extracted.
         """
         if not self._open_solutions_tab():
             return None
 
-        # Filter by Java language
+        # Apply Java filter via URL param
         self._apply_language_filter(TARGET_LANGUAGE)
         self.page.wait_for_timeout(1_500)
 
-        # Get all solution cards and pick most upvoted
-        code = self._pick_most_upvoted_solution()
-        return code
+        # Collect all solution detail page URLs, then iterate
+        return self._find_java_solution()
 
     # ── private steps ──────────────────────────────────────────────────────────
 
+    def _find_java_solution(self) -> Optional[str]:
+        """
+        Collect all solution URLs from the listing page and try each one
+        (starting from the 2nd) until valid Java code is found.
+        """
+        links = self._get_solution_links()
+
+        if not links:
+            logger.warning("No solution links found on solutions page")
+            return self._fallback_first_code_block()
+
+        logger.info(f"Found {len(links)} solution links — trying from 2nd onwards")
+
+        # Start from index 1 (2nd solution) to skip potentially locked/premium 1st,
+        # then fall back to the 1st if nothing else works.
+        order = list(range(1, len(links))) + [0] if len(links) > 1 else [0]
+
+        for attempt_num, idx in enumerate(order[:10], 1):  # try up to 10
+            url = links[idx]
+            logger.info(f"Solution attempt {attempt_num} (list position {idx + 1}): {url}")
+            try:
+                self.page.goto(url)
+                self.page.wait_for_load_state("load")
+                self.page.wait_for_timeout(2_000)
+            except Exception as e:
+                logger.debug(f"Navigation failed for {url}: {e}")
+                continue
+
+            code = self._extract_code_from_solution_page()
+            if code and _is_valid_java(code):
+                logger.info(f"Valid Java solution found at position {idx + 1} ({len(code)} chars) ✅")
+                return code
+
+            logger.debug(f"Position {idx + 1} has no valid Java code — trying next")
+
+        logger.warning("No valid Java solution found after trying all available solutions")
+        return None
+
+    def _get_solution_links(self) -> List[str]:
+        """Collect all solution detail page URLs from the current solutions listing."""
+        links: List[str] = []
+        seen: set = set()
+        try:
+            for a in self.page.locator("a[href*='/solutions/']").all():
+                try:
+                    href = a.get_attribute("href", timeout=500)
+                    if not href:
+                        continue
+                    full = href if href.startswith("http") else f"https://leetcode.com{href}"
+                    # Skip the solutions listing page itself
+                    if full.rstrip("/").endswith("/solutions"):
+                        continue
+                    if full not in seen:
+                        seen.add(full)
+                        links.append(full)
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.error(f"Error collecting solution links: {e}")
+        return links
+
     def _open_solutions_tab(self) -> bool:
-        """Click the Solutions tab on the LeetCode problem page."""
+        """
+        Navigate directly to the /solutions/ URL for the current problem.
+        This is more reliable than looking for a Solutions tab in the UI,
+        which LeetCode changes frequently.
+        """
+        current_url = self.page.url
+
+        # Fail fast with a clear message if the page reference is wrong
+        if 'leetcode.com' not in current_url:
+            logger.error(f"_open_solutions_tab called on non-LeetCode page: {current_url}")
+            return False
+
+        # Extract base problem URL: https://leetcode.com/problems/{slug}
+        m = re.match(r'(https://leetcode\.com/problems/[^/?#]+)', current_url)
+        if m:
+            base = m.group(1).rstrip('/')
+            solutions_url = f"{base}/solutions/"
+            logger.info(f"Navigating directly to solutions page: {solutions_url}")
+            for attempt in range(3):
+                try:
+                    self.page.goto(solutions_url)
+                    self.page.wait_for_load_state("load")
+                    self.page.wait_for_timeout(1_500)
+                    logger.info("Opened LeetCode Solutions page ✅")
+                    return True
+                except Exception as e:
+                    if attempt < 2:
+                        logger.warning(f"Solutions page navigation failed (attempt {attempt+1}/3): {e} — retrying…")
+                        time.sleep(2)
+                    else:
+                        logger.error(f"Solutions page navigation failed after 3 attempts: {e}")
+            return False
+
+        # Fallback: try clicking a Solutions tab in the UI
         selectors = [
             "a:has-text('Solutions')",
             "div[role='tab']:has-text('Solutions')",
@@ -54,150 +147,82 @@ class LeetCodeSolutionScraper:
                 tab = self.page.locator(sel).first
                 tab.wait_for(state="visible", timeout=TIMEOUT_SHORT)
                 tab.click()
-                self.page.wait_for_load_state("networkidle")
+                self.page.wait_for_load_state("load")
                 self.page.wait_for_timeout(1_500)
                 logger.info("Opened LeetCode Solutions tab ✅")
                 return True
             except PWTimeout:
                 continue
-        logger.error("Could not find Solutions tab")
+        logger.error("Could not navigate to Solutions page")
         return False
 
     def _apply_language_filter(self, language: str):
-        """Try to filter solutions by language. Silently skip if filter not found."""
-        lang_filter_selectors = [
-            f"button:has-text('{language}')",
-            f"[class*='filter']:has-text('{language}')",
-            "select[class*='lang']",
-            "[class*='LanguageFilter']",
-            "div[class*='filter'] button",
-        ]
-        for sel in lang_filter_selectors:
-            try:
-                el = self.page.locator(sel).first
-                el.wait_for(state="visible", timeout=TIMEOUT_SHORT)
-                if el.evaluate("e => e.tagName") == "SELECT":
-                    el.select_option(label=language)
-                else:
-                    el.click()
-                    # If dropdown opened, pick Java option
-                    try:
-                        opt = self.page.locator(f"li:has-text('{language}'), option:has-text('{language}')").first
-                        opt.wait_for(state="visible", timeout=TIMEOUT_SHORT)
-                        opt.click()
-                    except PWTimeout:
-                        pass
-                self.page.wait_for_timeout(1_000)
-                logger.debug(f"Language filter set to {language}")
-                return
-            except PWTimeout:
-                continue
-        logger.warning(f"Could not apply {language} filter — proceeding without filter")
-
-    def _pick_most_upvoted_solution(self) -> Optional[str]:
         """
-        Parse solution cards, find the one with highest upvotes that is a Java solution,
-        click it, and extract the code.
+        Apply language filter via URL parameter — much more reliable than UI clicks.
+        LeetCode supports: ?languageTags=java
         """
-        # Collect solution cards
-        card_selectors = [
-            "[class*='solution-card']",
-            "[class*='SolutionCard']",
-            "[class*='solution__']",
-            "div[class*='topic-item']",
-            "div[class*='titleSlug']",
-            # Very broad — any div that has a vote count and a title
-            "div:has([class*='vote']):has(a[href*='/solutions/'])",
-        ]
+        current_url = self.page.url
+        lang_param = language.lower()  # "java"
 
-        cards = []
-        for sel in card_selectors:
-            cards = self.page.locator(sel).all()
-            if cards:
-                logger.debug(f"Solution card selector: {sel} ({len(cards)} cards)")
-                break
+        # Build new URL with languageTags param
+        if '?' in current_url:
+            if 'languageTags' in current_url:
+                return  # already filtered
+            new_url = f"{current_url}&languageTags={lang_param}"
+        else:
+            new_url = f"{current_url}?languageTags={lang_param}"
 
-        if not cards:
-            logger.warning("No solution cards found on Solutions tab")
-            return self._fallback_first_code_block()
-
-        # Score cards by upvote count + Java preference
-        best_card = None
-        best_score = -1
-
-        for card in cards:
-            try:
-                card_text = card.inner_text().strip()
-
-                # Prefer Java solutions
-                is_java = "java" in card_text.lower()
-
-                # Extract vote count
-                votes = self._extract_vote_count(card_text)
-
-                # Score: Java gets a big bonus
-                score = votes + (100_000 if is_java else 0)
-
-                if score > best_score:
-                    best_score = score
-                    best_card = card
-
-            except Exception:
-                continue
-
-        if best_card is None:
-            logger.warning("Could not score any solution cards")
-            return self._fallback_first_code_block()
-
-        # Click the best card to open it
-        return self._open_solution_card(best_card)
-
-    def _open_solution_card(self, card) -> Optional[str]:
-        """Click a solution card and extract the code from the solution detail page."""
-        try:
-            # Try clicking the title link inside the card
-            link = card.locator("a[href*='/solutions/']").first
-            link.wait_for(state="visible", timeout=TIMEOUT_SHORT)
-            link.click()
-        except PWTimeout:
-            try:
-                card.click()
-            except Exception as e:
-                logger.error(f"Could not click solution card: {e}")
-                return None
-
-        self.page.wait_for_load_state("networkidle")
-        self.page.wait_for_timeout(2_000)
-
-        return self._extract_code_from_solution_page()
+        logger.debug(f"Applying language filter via URL: {new_url}")
+        self.page.goto(new_url)
+        self.page.wait_for_load_state("load")
+        self.page.wait_for_timeout(1_000)
+        logger.debug(f"Language filter set to {language} ✅")
 
     def _extract_code_from_solution_page(self) -> Optional[str]:
         """
         On a solution detail page, find and extract the Java code.
-        Tries multiple selector strategies.
+        Tries multiple strategies in order of reliability.
         """
+        # Strategy 1: Read-only Monaco editor (LeetCode embeds this in solution pages)
+        try:
+            code = self.page.evaluate(
+                """() => {
+                    if (typeof monaco !== 'undefined') {
+                        const models = monaco.editor.getModels();
+                        if (models && models.length > 0) return models[0].getValue();
+                    }
+                    return null;
+                }"""
+            )
+            if code and len(code) > 20:
+                logger.info(f"Extracted code via Monaco JS ({len(code)} chars) ✅")
+                return code
+        except Exception:
+            pass
+
+        # Strategy 2: DOM selectors
         code_selectors = [
             "pre code",
             ".view-lines",
             "[class*='CodeMirror'] .CodeMirror-code",
             "[class*='hljs']",
             "code[class*='language-java']",
+            "code[class*='language-']",
             "code",
             "pre",
         ]
-
         for sel in code_selectors:
             try:
                 el = self.page.locator(sel).first
                 el.wait_for(state="visible", timeout=TIMEOUT_MEDIUM)
                 code = el.inner_text().strip()
-                if code and len(code) > 20:  # sanity check
-                    logger.info(f"Extracted solution code ({len(code)} chars) ✅")
+                if code and len(code) > 20:
+                    logger.info(f"Extracted solution code via DOM ({len(code)} chars) ✅")
                     return code
             except PWTimeout:
                 continue
 
-        # Last resort: copy via clipboard
+        # Strategy 3: Copy button / clipboard
         logger.warning("Could not extract code via DOM — trying clipboard copy")
         return self._extract_via_copy_button()
 
@@ -234,12 +259,8 @@ class LeetCodeSolutionScraper:
 
     @staticmethod
     def _extract_vote_count(text: str) -> int:
-        """Parse a vote/like count number from card text."""
-        # Look for patterns like "1.2K", "345", "K"
-        patterns = [
-            r"(\d+\.?\d*)[Kk]",   # e.g. 1.2K
-            r"(\d+)",             # plain integer
-        ]
+        """Parse a vote/like count number from card text (kept for compatibility)."""
+        patterns = [r"(\d+\.?\d*)[Kk]", r"(\d+)"]
         for pat in patterns:
             m = re.search(pat, text)
             if m:
@@ -252,3 +273,16 @@ class LeetCodeSolutionScraper:
                 except ValueError:
                     pass
         return 0
+
+
+# ── module-level helpers ────────────────────────────────────────────────────────
+
+def _is_valid_java(code: str) -> bool:
+    """
+    Return True if extracted code looks like a real Java solution.
+    Rejects empty stubs, truncated previews, and non-Java code.
+    """
+    if not code or len(code) < 150:  # stubs are usually < 100 chars
+        return False
+    java_keywords = ["class ", "public ", "return ", "{", "}"]
+    return sum(1 for kw in java_keywords if kw in code) >= 4

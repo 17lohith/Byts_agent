@@ -92,9 +92,9 @@ def handle_google_relogin(page: Page, expected_email: str, site_name: str) -> bo
     site_google_btns = (
         BYTESONE_SELECTORS["google_signin_btn"]
         if "byts" in site_name.lower()
-        else ", ".join(LEETCODE_SELECTORS["google_signin_btn"])
+        else LEETCODE_SELECTORS["google_signin_btn"]
     )
-    clicked = _click_first_visible(page, *site_google_btns.split(", "))
+    clicked = _click_first_visible(page, *site_google_btns)
     if not clicked:
         logger.error("Could not find 'Sign in with Google' button")
         return False

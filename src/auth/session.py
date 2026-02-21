@@ -40,7 +40,7 @@ def ensure_bytesone_login(page: Page, bytesone_url: str, email: str,
     """
     logger.info(f"Checking BytsOne login … ({bytesone_url})")
     page.goto(bytesone_url)
-    page.wait_for_load_state("networkidle")
+    page.wait_for_load_state("load")
 
     if _is_logged_in(page, BYTESONE_LOGGED_IN):
         logger.info("BytsOne: already logged in ✅")
@@ -57,7 +57,7 @@ def ensure_bytesone_login(page: Page, bytesone_url: str, email: str,
         logger.info("BytsOne session expired — attempting auto re-login …")
         ok = handle_google_relogin(page, expected_email=email, site_name="BytsOne")
         if ok:
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("load")
         return ok
 
 
@@ -68,7 +68,7 @@ def ensure_leetcode_login(page: Page, leetcode_url: str, email: str,
     """
     logger.info(f"Checking LeetCode login … ({leetcode_url})")
     page.goto(leetcode_url)
-    page.wait_for_load_state("networkidle")
+    page.wait_for_load_state("load")
 
     if _is_leetcode_logged_in(page):
         logger.info("LeetCode: already logged in ✅")
@@ -80,7 +80,7 @@ def ensure_leetcode_login(page: Page, leetcode_url: str, email: str,
         logger.info("LeetCode session expired — attempting auto re-login …")
         ok = handle_google_relogin(page, expected_email=email, site_name="LeetCode")
         if ok:
-            page.wait_for_load_state("networkidle")
+            page.wait_for_load_state("load")
         return ok
 
 

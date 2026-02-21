@@ -113,12 +113,15 @@ LEETCODE_SOLUTIONS = {
 # ── LeetCode: Code editor & submission ─────────────────────────────────────────
 
 LEETCODE_EDITOR = {
-    "code_editor":      ".monaco-editor",
-    "lang_selector":    "[id*='lang'] button, button[class*='lang']",
-    "java_option":      "text=Java",
-    "submit_button":    ["[data-e2e-locator='console-submit-button']", "button:has-text('Submit')"],
-    "result_accepted":  ["text=Accepted", "[data-e2e-locator='submission-result']:has-text('Accepted')"],
-    "result_wrong":     ["text=Wrong Answer", "text=Runtime Error", "text=Time Limit Exceeded", "text=Compile Error"],
+    "code_editor":              ".monaco-editor",
+    "lang_selector":            "[id*='lang'] button, button[class*='lang']",
+    "java_option":              "text=Java",
+    "submit_button":            ["[data-e2e-locator='console-submit-button']", "button:has-text('Submit')"],
+    # Primary: read the submission-result panel text to confirm "Accepted"
+    "result_accepted":          ["[data-e2e-locator='submission-result']:has-text('Accepted')"],
+    # Fallback: CSS-class-based accepted signals (no broad text match)
+    "result_accepted_fallback": ["[class*='accepted']", "[class*='success'][class*='result']"],
+    "result_wrong":             ["text=Wrong Answer", "text=Runtime Error", "text=Time Limit Exceeded", "text=Compile Error"],
 }
 
 # ── Google OAuth ────────────────────────────────────────────────────────────────
