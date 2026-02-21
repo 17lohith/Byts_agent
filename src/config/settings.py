@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     anthropic_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
     # OpenRouter Settings (used as default LLM provider)
-    openrouter_api_key: str = "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"
+    openrouter_api_key: str = ""
     openrouter_model: str = "minimax/minimax-m2.5"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
