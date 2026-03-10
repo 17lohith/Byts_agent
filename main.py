@@ -90,13 +90,17 @@ def process_course(
 
         logger.info(f"\n  ── {label} ({chapter['progress_pct']}%) ──")
 
-        # Click the day to load its problem list
-        bytesone.click_chapter(chapter)
+        # Click the day to load its problem list — click_chapter handles stale refs
+        if not bytesone.click_chapter(chapter):
+            logger.warning(f"  [{label}] Could not click chapter — skipping")
+            continue
 
-        # Get problems for this day
+        # Get problems for this day  
         problems = bytesone.get_problems_in_chapter(day_num)
         if not problems:
             logger.warning(f"  [{label}] No problems found — skipping")
+            # Re-open course so next chapter can be found freshly
+            bytesone.open_course(course_key)
             continue
 
         for prob_idx, problem in enumerate(problems, 1):
@@ -126,11 +130,7 @@ def process_course(
                 continue
 
             # Click "Activate" if present (for new problems)
-            if not bytesone.click_activate():
-                logger.error(f"  {label_str} — could not activate problem")
-                progress.mark_failed(course_key, day_key, problem_id)
-                counts["failed"] += 1
-                continue
+            bytesone.click_activate()   # returns True even if not found — non-fatal
 
             # Click "Take Challenge"
             if not bytesone.click_take_challenge():
@@ -139,18 +139,21 @@ def process_course(
                 counts["failed"] += 1
                 continue
 
+            # Save the exact problem URL NOW (after activate/take-challenge, before dialog)
+            # bytesone._current_problem_url is also updated in click_take_challenge
+            problem_return_url = bytesone._current_problem_url or page.url
+
             # Handle the LeetCode contest confirmation dialog
-            bytesone_url_before = page.url
             if not bytesone.handle_contest_dialog():
                 logger.error(f"  {label_str} — could not confirm contest dialog")
                 progress.mark_failed(course_key, day_key, problem_id)
                 counts["failed"] += 1
                 continue
 
-            # Wait for LeetCode to open in NEW TAB (poll with retries)
+            # Wait for LeetCode to open in NEW TAB
             logger.info("Waiting for LeetCode tab to open...")
             leetcode_page = None
-            for _attempt in range(20):  # poll up to 10 seconds (20 × 500ms)
+            for _attempt in range(40):   # poll up to 20 seconds
                 page.wait_for_timeout(500)
                 for p in browser._context.pages:
                     if "leetcode.com" in p.url and p.url != "about:blank":
@@ -158,57 +161,50 @@ def process_course(
                         break
                 if leetcode_page:
                     break
-            
+
             if leetcode_page is None:
-                logger.error("Could not find LeetCode tab — contest may not have opened")
+                logger.error("LeetCode tab never opened — skipping problem")
                 progress.mark_failed(course_key, day_key, problem_id)
                 counts["failed"] += 1
                 continue
-            
-            # Update page reference to LeetCode tab
+
+            # Switch to LeetCode tab
             old_page = page
             page = leetcode_page
-            leetcode.page = leetcode_page  # Update solver's page reference
-            
+            leetcode.page = leetcode_page
+            bytesone.page = leetcode_page   # temporarily points to LC tab
+
             page.wait_for_load_state("load")
             logger.info(f"Switched to LeetCode tab: {page.url}")
 
-            # Check for login wall on LeetCode tab
+            # Re-auth if login wall
             if leetcode._is_login_wall():
                 if not _reauth_leetcode(leetcode_page, browser):
                     logger.error("Re-auth failed — stopping")
                     sys.exit(1)
 
-            # Solve the problem using Solutions tab
+            # Solve the problem
             success = leetcode.solve_current_problem()
 
-            if not success:
-                logger.error(f"  {label_str} — failed to solve")
-                progress.mark_failed(course_key, day_key, problem_id)
-                counts["failed"] += 1
-                # Close LeetCode tab and switch back to BytsOne
-                leetcode_page.close()
-                page = old_page
-                bytesone.page = old_page
-                leetcode.page = old_page
-                continue
-
-            # ── Back to BytsOne: Mark as Complete ──────────────────────────────
-            # Close LeetCode tab
+            # ── Back to BytsOne ────────────────────────────────────────────────
             leetcode_page.close()
             logger.info("Closed LeetCode tab, returning to BytsOne")
-            
-            # Switch back to BytsOne tab
+
             page = old_page
             bytesone.page = old_page
             leetcode.page = old_page
-            
-            # Navigate back to problem page
-            if bytesone_url_before and "bytsone.com" in bytesone_url_before:
-                page.goto(bytesone_url_before)
-                page.wait_for_load_state("load")
-            else:
-                bytesone.open_course(course_key)
+
+            if not success:
+                logger.error(f"  {label_str} — failed to solve on LeetCode")
+                progress.mark_failed(course_key, day_key, problem_id)
+                counts["failed"] += 1
+                continue
+
+            # Navigate back to the exact problem page for Mark as Complete
+            logger.debug(f"Returning to problem page: {problem_return_url}")
+            page.goto(problem_return_url)
+            page.wait_for_load_state("load")
+            page.wait_for_timeout(1_500)
 
             # Click Mark as Complete
             marked = bytesone.mark_complete()
@@ -220,7 +216,7 @@ def process_course(
             counts["solved"] += 1
             logger.info(f"  {label_str} — SOLVED ✅")
 
-            # Click Next Lesson to advance
+            # Click Next Lesson to advance to the next problem in BytsOne
             bytesone.click_next_lesson()
             time.sleep(0.5)
 
@@ -229,9 +225,8 @@ def process_course(
             f"solved: {counts['solved']}  skipped: {counts['skipped']}  failed: {counts['failed']}"
         )
 
-        # Re-open the course page so the chapter sidebar is fresh for next day
+        # Re-open the course page so the next chapter's sidebar element is fresh
         bytesone.open_course(course_key)
-        chapters = bytesone.get_chapters()  # refresh chapter list after re-open
 
     return counts
 

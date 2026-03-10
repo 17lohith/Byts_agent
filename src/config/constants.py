@@ -88,6 +88,9 @@ LEETCODE_SELECTORS = {
         "a:has-text('Sign in with Google')",
         "button:has-text('Continue with Google')",
         "a:has-text('Continue with Google')",
+        "[data-cy='sign-in-with-google']",
+        "a[href*='google'][class*='btn']",
+        "a[href*='google']",
     ]
 }
 

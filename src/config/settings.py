@@ -31,7 +31,7 @@ class Settings(BaseSettings):
         return [c.strip() for c in self.courses_order.split(",") if c.strip()]
 
     # LLM Provider Configuration
-    llm_provider: str = "openrouter"
+    llm_provider: str = "featherless"
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
 
@@ -43,7 +43,13 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-3-5-sonnet-20241022"
     anthropic_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
-    # OpenRouter Settings (used as default LLM provider)
+    # Featherless Settings (primary LLM provider)
+    featherless_api_key: str = ""
+    featherless_model: str = "moonshotai/Kimi-K2.5"
+    featherless_base_url: str = "https://api.featherless.ai/v1"
+    featherless_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+
+    # OpenRouter Settings (fallback LLM provider)
     openrouter_api_key: str = ""
     openrouter_model: str = "minimax/minimax-m2.5"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
@@ -74,7 +80,7 @@ class Settings(BaseSettings):
     @field_validator("llm_provider")
     @classmethod
     def validate_llm_provider(cls, v: str) -> str:
-        allowed = {"openai", "anthropic", "openrouter"}
+        allowed = {"openai", "anthropic", "openrouter", "featherless"}
         if v not in allowed:
             raise ValueError(f"llm_provider must be one of {allowed}, got '{v}'")
         return v
@@ -87,6 +93,8 @@ class Settings(BaseSettings):
 
     @property
     def llm_api_key(self) -> Optional[str]:
+        if self.llm_provider == "featherless":
+            return self.featherless_api_key
         if self.llm_provider == "openrouter":
             return self.openrouter_api_key
         if self.llm_provider == "openai":
@@ -95,6 +103,8 @@ class Settings(BaseSettings):
 
     @property
     def llm_model(self) -> str:
+        if self.llm_provider == "featherless":
+            return self.featherless_model
         if self.llm_provider == "openrouter":
             return self.openrouter_model
         if self.llm_provider == "openai":
@@ -103,6 +113,8 @@ class Settings(BaseSettings):
 
     @property
     def llm_temperature(self) -> float:
+        if self.llm_provider == "featherless":
+            return self.featherless_temperature
         if self.llm_provider == "openrouter":
             return self.openrouter_temperature
         if self.llm_provider == "openai":

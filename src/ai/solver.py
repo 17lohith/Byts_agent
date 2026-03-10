@@ -162,12 +162,53 @@ class AIAgent:
             logger.info(f"[AI] Escalated solution: {len(new_code)} chars ✅")
         return new_code
 
+    def analyze_page(self, screenshot_bytes: bytes, question: str) -> Optional[str]:
+        """
+        Use the VLM to analyze a page screenshot and answer a question about it.
+        Only works when provider is featherless (Kimi-K2.5 is a VLM).
+        Falls back to OpenRouter text-only if featherless fails.
+        """
+        import base64
+        image_b64 = base64.b64encode(screenshot_bytes).decode()
+
+        if self._provider == "featherless":
+            try:
+                from openai import OpenAI
+                client = OpenAI(
+                    api_key=self.settings.featherless_api_key,
+                    base_url=self.settings.featherless_base_url,
+                )
+                response = client.chat.completions.create(
+                    model=self.settings.featherless_model,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+                            {"type": "text", "text": question},
+                        ],
+                    }],
+                    max_tokens=1024,
+                )
+                result = response.choices[0].message.content
+                return result.strip() if result else None
+            except Exception as e:
+                logger.warning(f"[AI] VLM analyze_page failed: {e}")
+                return None
+
+        logger.warning("[AI] analyze_page called but provider is not featherless — skipping VLM")
+        return None
+
     # ── internal ───────────────────────────────────────────────────────────────
 
     def _get_client(self):
         if self._client is None:
             from openai import OpenAI
-            if self._provider == "openrouter":
+            if self._provider == "featherless":
+                self._client = OpenAI(
+                    api_key=self.settings.featherless_api_key,
+                    base_url=self.settings.featherless_base_url,
+                )
+            elif self._provider == "openrouter":
                 self._client = OpenAI(
                     api_key=self.settings.openrouter_api_key,
                     base_url=self.settings.openrouter_base_url,
@@ -197,10 +238,44 @@ class AIAgent:
                     logger.error(
                         f"[AI] API failed after {self._MAX_API_RETRIES} attempts: {e}"
                     )
+
+        # Featherless failed — fall back to OpenRouter
+        if self._provider == "featherless" and self.settings.openrouter_api_key:
+            logger.warning("[AI] Featherless unavailable — falling back to OpenRouter")
+            try:
+                return self._call_openrouter_fallback(prompt)
+            except Exception as e:
+                logger.error(f"[AI] OpenRouter fallback also failed: {e}")
+
         return None
 
+    def _call_openrouter_fallback(self, prompt: str) -> str:
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=self.settings.openrouter_api_key,
+            base_url=self.settings.openrouter_base_url,
+            default_headers={
+                "HTTP-Referer": "https://github.com/bytes-bot",
+                "X-Title": "BytsOne Automation Bot",
+            },
+        )
+        response = client.chat.completions.create(
+            model=self.settings.openrouter_model,
+            messages=[
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=self.settings.openrouter_temperature,
+            max_tokens=4096,
+        )
+        result = response.choices[0].message.content
+        if result is None:
+            raise ValueError("OpenRouter fallback returned empty content")
+        logger.info("[AI] OpenRouter fallback succeeded ✅")
+        return result.strip()
+
     def _call_llm(self, prompt: str) -> str:
-        if self._provider in ("openrouter", "openai"):
+        if self._provider in ("featherless", "openrouter", "openai"):
             return self._call_openai_compat(prompt)
         elif self._provider == "anthropic":
             return self._call_anthropic(prompt)
@@ -208,11 +283,12 @@ class AIAgent:
 
     def _call_openai_compat(self, prompt: str) -> str:
         client = self._get_client()
-        model = (
-            self.settings.openrouter_model
-            if self._provider == "openrouter"
-            else self.settings.openai_model
-        )
+        if self._provider == "featherless":
+            model = self.settings.featherless_model
+        elif self._provider == "openrouter":
+            model = self.settings.openrouter_model
+        else:
+            model = self.settings.openai_model
         temperature = self.settings.llm_temperature
         response = client.chat.completions.create(
             model=model,

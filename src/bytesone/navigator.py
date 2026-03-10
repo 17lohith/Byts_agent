@@ -25,6 +25,7 @@ class BytesOneNavigator:
         self.page = page
         self.settings = settings
         self._current_problem_url: Optional[str] = None  # saved before Take Challenge
+        self._chapter_url: Optional[str] = None           # course overview URL for stale-ref recovery
 
     # ── 1. Open course ─────────────────────────────────────────────────────────
 
@@ -159,197 +160,448 @@ class BytesOneNavigator:
         return chapters
 
     def click_chapter(self, chapter: Dict) -> bool:
-        """Click a day chapter. Returns True on success."""
-        try:
+        """
+        Click a day chapter to expand its problem list.
+        Falls back to text-based re-discovery when the stored element is stale
+        (e.g. after open_course reloads the page).
+        """
+        day_num = chapter["day_num"]
+        label   = chapter["label"]
+
+        def _try_element_click():
             chapter["element"].click()
             self.page.wait_for_load_state("load")
             self.page.wait_for_timeout(1_500)
-            return True
-        except Exception as e:
-            logger.error(f"Could not click chapter {chapter['label']}: {e}")
+
+        def _find_and_click_fresh():
+            """Re-find the chapter sidebar row by 'Day N' text."""
+            candidates = self.page.locator("*").filter(
+                has_text=re.compile(rf"^Day\s+{day_num}\b")
+            ).all()
+            for el in candidates:
+                try:
+                    txt = el.inner_text(timeout=300).strip()
+                    if re.match(rf"^Day\s+{day_num}\b", txt) and ("%" in txt or "lock" in el.inner_html(timeout=300).lower()):
+                        el.click()
+                        chapter["element"] = el   # refresh cached element
+                        self.page.wait_for_load_state("load")
+                        self.page.wait_for_timeout(1_500)
+                        return True
+                except Exception:
+                    continue
             return False
+
+        try:
+            _try_element_click()
+            self._chapter_url = self.page.url
+            return True
+        except Exception:
+            logger.debug(f"Chapter element stale for {label} — re-finding in sidebar")
+            try:
+                ok = _find_and_click_fresh()
+                if ok:
+                    self._chapter_url = self.page.url
+                return ok
+            except Exception as e:
+                logger.error(f"Could not click chapter {label}: {e}")
+                return False
 
     # ── 3. Problems ────────────────────────────────────────────────────────────
 
     def get_problems_in_chapter(self, day_num: int) -> List[Dict]:
-        r"""
-        After clicking a chapter, the right panel shows the day's problems.
-        KEY: scope search to the container that has the 'N. Day N' heading.
-        Problem items have circle indicators (no "%" text, no nav labels).
+        """
+        Find problems for the currently-selected chapter.
+        Strategy 1 (primary): URL-based — find <a href> links to problem UUIDs.
+        Strategy 2 (secondary): Sidebar-exclusion DOM scan — finds clickable items
+                                  in the content panel by excluding sidebar cards.
+        Strategy 3 (fallback): VLM screenshot — ask the model what problems are visible.
         """
         self.page.wait_for_timeout(1_500)
 
-        # Find the day heading in the content area.
-        # Try several patterns — actual format varies by platform version.
-        heading_loc = None
-        tried_patterns = []
-        for pattern in [
-            f"text={day_num}. Day {day_num}",
-            f"*:has-text('{day_num}. Day {day_num}')",
-            f"text=Day {day_num}",
-            f"h1:has-text('Day {day_num}')",
-            f"h2:has-text('Day {day_num}')",
-            f"h3:has-text('Day {day_num}')",
-            f"[class*='title']:has-text('Day {day_num}')",
-            f"[class*='heading']:has-text('Day {day_num}')",
-        ]:
-            tried_patterns.append(pattern)
-            try:
-                locs = self.page.locator(pattern).all()
-                if locs:
-                    heading_loc = locs[-1]  # last = content area, not sidebar
-                    logger.debug(f"Day heading found with pattern: {pattern!r}")
-                    break
-            except Exception:
-                continue
+        # Strategy 1: UUID href links (works for most days)
+        problems = self._get_problems_by_links()
+        if problems:
+            logger.info(
+                f"Day {day_num} problems: "
+                + ", ".join(f"{p['title']}({'✓' if p['completed'] else '○'})" for p in problems)
+            )
+            return problems
 
-        if heading_loc is None:
-            # Dump all visible text to help diagnose what the page looks like
-            try:
-                sample = self.page.evaluate(
-                    "() => document.body.innerText.substring(0, 800)"
-                )
-                logger.warning(
-                    f"Could not find heading for Day {day_num}.\n"
-                    f"  Tried: {tried_patterns}\n"
-                    f"  Page text sample: {sample!r}"
-                )
-            except Exception:
-                logger.warning(f"Could not find heading 'Day {day_num}'")
-            return self._problems_fallback()
+        logger.warning(f"[Day {day_num}] URL-based detection found nothing — trying DOM scan")
 
-        # Walk UP from heading to find the panel containing the problem list.
-        # Look for li OR div/a children — different platforms use different tags.
-        problems_data = self.page.evaluate(
-            """
-            (headingEl) => {
-                if (!headingEl) return { debug: 'no element', items: [] };
+        # Strategy 2: sidebar-exclusion DOM scan (good for Day 1 which is the
+        # default chapter and may render items without UUID-based hrefs)
+        problems = self._get_problems_by_dom_scan(day_num)
+        if problems:
+            logger.info(
+                f"Day {day_num} problems (DOM scan): "
+                + ", ".join(f"{p['title']}({'✓' if p['completed'] else '○'})" for p in problems)
+            )
+            return problems
 
-                // Walk up to find a container with several child elements
-                let container = headingEl.parentElement;
-                let walkLog = [];
-                for (let i = 0; i < 8; i++) {
-                    if (!container) break;
-                    const items = container.querySelectorAll('li, a[href], div[class*="item"], div[class*="lesson"], div[class*="problem"]');
-                    walkLog.push(`depth=${i} tag=${container.tagName} class=${container.className} items=${items.length}`);
-                    if (items.length >= 2) break;
-                    container = container.parentElement;
-                }
+        logger.warning(f"[Day {day_num}] DOM scan found nothing — trying VLM screenshot")
 
-                if (!container) return { debug: 'no container. walk: ' + walkLog.join(' | '), items: [] };
+        # Strategy 3: VLM screenshot
+        problems = self._get_problems_via_vlm(day_num)
+        if problems:
+            logger.info(
+                f"Day {day_num} problems (VLM): "
+                + ", ".join(f"{p['title']}" for p in problems)
+            )
+            return problems
 
-                const results = [];
-                const seen = new Set();
-                const _NAV = new Set([
-                    'dashboard','overall report','assessments','contest calendar',
-                    'mentoring support','global platform assessments','courses',
-                    'dsa sheets','explore','certificates','live session','ide',
-                    'ai interview','resume builder','gps leaderboard','log out','back',
-                    'completed',  // Filter out the "Completed" status item
-                ]);
+        logger.warning(f"[Day {day_num}] No problems found via any strategy — skipping")
+        return []
 
-                // Try li first, then divs with item/lesson/problem class
-                const candidates = Array.from(
-                    container.querySelectorAll('li, div[class*="item"], div[class*="lesson"], div[class*="problem"], a[href]')
+    def _get_problems_by_links(self) -> List[Dict]:
+        """
+        Find problems by locating <a> tags whose href contains the course UUID
+        followed by one or more additional UUIDs (problem/section identifiers).
+        Handles both URL formats BytsOne uses:
+          /home/course/{courseUuid}/active/{sectionUuid}
+          /course/{courseUuid}/{moduleUuid}/{sectionUuid}/{problemUuid}
+        """
+        current_url = self.page.url
+        m = re.search(r'(?:/home)?/course/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', current_url)
+        if not m:
+            logger.debug("_get_problems_by_links: not on a course page")
+            return []
+        course_uuid = m.group(1)
+
+        # Non-problem navigation texts to skip
+        JUNK_TITLES = {
+            'toggle sidebar', 'bytsone', 'back', 'curriculum',
+            'goal', 'analytics', 'leaderboard', 'certificate', 'communication channel',
+            'chapters', 'select module', 'earn certificate', 'continue learning',
+            'start learning', 'activate', 'log out', 'dashboard', 'explore',
+            'assessments', 'schedule', 'live session', 'ide', 'resume builder',
+            'notifications', 'settings', 'profile',
+        }
+
+        links_data = self.page.evaluate(
+            r"""
+            ([courseUuid, junkSet]) => {
+                const UUID_PAT = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+                const UUID_RE  = new RegExp(UUID_PAT, 'i');
+                // Match the course UUID with at least one more UUID in the path
+                const COURSE_RE = new RegExp(
+                    '(?:/home)?/course/' + courseUuid + '(?:/[^?#]+)?/' + UUID_PAT, 'i'
                 );
 
-                candidates.forEach(el => {
-                    const rawText = el.textContent || '';
-                    const text = rawText.trim().replace(/\\n/g, ' ').replace(/\\s+/g, ' ');
+                const results = [];
+                const seenHref = new Set();
+                const seenTitle = new Set();
 
-                    if (!text || text.length < 3 || text.length > 120) return;
-                    if (/^Day\\s+\\d/.test(text)) return;     // skip day headers
-                    if (/\\d+%/.test(text)) return;           // skip progress %
-                    if (_NAV.has(text.toLowerCase())) return; // skip nav labels
-                    if (seen.has(text)) return;
-                    seen.add(text);
+                document.querySelectorAll('a[href]').forEach(a => {
+                    const href = a.getAttribute('href') || '';
+                    if (!COURSE_RE.test(href)) return;
 
-                    const html = el.innerHTML || '';
-                    const hasCheck = html.includes('check') ||
-                                     html.includes('complete') ||
-                                     html.includes('done') ||
-                                     el.querySelector('svg circle[fill]') !== null;
+                    // Must be a DEEPER link than the current chapter page
+                    // i.e., it must have more path segments than just /active
+                    const segments = href.split('/').filter(Boolean);
+                    const uuidCount = segments.filter(s => UUID_RE.test(s)).length;
+                    if (uuidCount < 2) return;  // need at least course uuid + problem uuid
 
-                    results.push({ title: text, completed: hasCheck });
+                    if (seenHref.has(href)) return;
+                    seenHref.add(href);
+
+                    let title = (a.textContent || '').trim().replace(/[\n\r\t]+/g, ' ').replace(/\s+/g, ' ');
+                    if (!title || title.length < 2 || title.length > 120) return;
+
+                    // Skip day headers and lock messages
+                    if (/^\d+\.?\s*Day\s+\d/i.test(title)) return;
+                    if (/^Day\s+\d/i.test(title)) return;
+                    if (/complete all previous/i.test(title)) return;
+                    if (title.includes('%')) return;
+
+                    const lower = title.toLowerCase();
+                    if (junkSet.some(j => lower === j || lower.startsWith(j + ' '))) return;
+
+                    if (seenTitle.has(lower)) return;
+                    seenTitle.add(lower);
+
+                    // Detect completion by checking for check/done/complete in the HTML
+                    const html = a.innerHTML || '';
+                    const done = /check|done|complete/i.test(html);
+
+                    results.push({ title, href, completed: done });
                 });
 
-                return { debug: 'container: ' + container.tagName + '.' + container.className + ' walk: ' + walkLog.join(' | '), items: results };
+                return results;
             }
             """,
-            heading_loc.element_handle(),
+            [course_uuid, list(JUNK_TITLES)],
         )
 
-        # problems_data is now { debug: str, items: [...] }
-        debug_info = problems_data.get("debug", "") if isinstance(problems_data, dict) else ""
-        items = problems_data.get("items", []) if isinstance(problems_data, dict) else []
-
-        if not items:
-            logger.warning(
-                f"No problems found via JS for Day {day_num}. Debug: {debug_info}"
-            )
-            return self._problems_fallback()
-
-        logger.debug(f"Day {day_num} JS container debug: {debug_info}")
+        if not links_data:
+            return []
 
         problems = []
-        for p in items:
+        for p in links_data:
             title = p["title"].strip()
             if not title:
                 continue
+            href = p["href"]
             problems.append({
                 "title":      title,
                 "problem_id": _slugify(title),
                 "completed":  p["completed"],
-                "element":    self.page.locator(f"li:has-text('{title}'), div:has-text('{title}')").last,
+                "href":       href,
+                "element":    self.page.locator(f'a[href="{href}"]').first,
             })
-
-        logger.info(
-            f"Day {day_num} problems: "
-            + ", ".join(f"{p['title']}({'✓' if p['completed'] else '○'})" for p in problems)
-        )
         return problems
 
-    def _problems_fallback(self) -> List[Dict]:
-        """Last-resort: any visible li text that doesn't look like a nav item."""
-        _NAV = {
-            "dashboard", "overall report", "assessments", "contest calendar",
-            "mentoring support", "global platform assessments", "courses",
-            "dsa sheets", "explore", "certificates", "live session", "ide",
-            "ai interview", "ai interview (new)", "resume builder",
-            "gps leaderboard", "log out", "back", "completed",
-        }
-        results = []
-        seen = set()
-        for li in self.page.locator("li").all():
-            try:
-                t = li.inner_text().strip()
-                if not t or t.lower() in _NAV or re.match(r"^Day\s+\d", t) or "%" in t:
+    def _get_problems_by_dom_scan(self, day_num: int) -> List[Dict]:
+        """
+        Fallback problem detector.  Scopes to the RIGHT content panel by looking
+        for the numbered Day heading ("1. Day 1") which only appears in the main
+        content — not in the left sidebar (which uses "DAY 1" in caps).
+        Applies very strict text filters so only proper LeetCode-style problem
+        titles make it through.
+        """
+        scan_data = self.page.evaluate(
+            r"""
+            (dayNum) => {
+                // ── exhaustive junk-skip list ─────────────────────────────────
+                const SKIP_EXACT = new Set([
+                    'dashboard','overall report','assessments','contest calendar',
+                    'mentoring support','global platform assessments','courses',
+                    'dsa sheets','explore','certificates','live session','ide',
+                    'ai interview','ai interview (new)','resume builder',
+                    'gps leaderboard','log out','back','completed','schedule',
+                    'notifications','settings','profile','leaderboard',
+                    'complete all previous chapters to proceed',
+                    'curriculum','goal','analytics','certificate',
+                    'communication channel','chapters','select module',
+                    'earn certificate','toggle sidebar','bytsone',
+                    'continue learning','start learning','activate',
+                    'take challenge','start contest','mark as complete',
+                    'next lesson','previous','report issue',
+                ]);
+                const SKIP_PREFIX = [
+                    'day ', 'toggle', 'karunya', 'course content',
+                ];
+                const SKIP_CONTAINS = [
+                    '%', '(', 'certificate available', 'product fit',
+                    '9-3-2026', '13-3-2026', '16-2-2026', '21-2-2026',
+                    'earn certificate', 'chapters', 'time spent',
+                    'challenge incomplete', 'active since',
+                ];
+
+                // ── find the RIGHT content panel ──────────────────────────────
+                // The right panel has a numbered heading like "1. Day N" or just
+                // shows the problem list directly.  The left sidebar uses allcaps.
+                let contentRoot = null;
+
+                // Option A: find a heading that matches "N. Day M" pattern
+                const headings = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5'));
+                for (const h of headings) {
+                    const t = (h.textContent || '').trim();
+                    if (/^\d+\.\s*Day\s+\d+/i.test(t)) {
+                        // Walk up to a reasonable container
+                        let node = h.parentElement;
+                        for (let i = 0; i < 6 && node && node !== document.body; i++) {
+                            if (node.children.length > 2) { contentRoot = node; break; }
+                            node = node.parentElement;
+                        }
+                        if (!contentRoot) contentRoot = h.parentElement;
+                        break;
+                    }
+                }
+
+                // Option B: fallback — use main/article/section or a large div
+                if (!contentRoot) {
+                    contentRoot = document.querySelector('main,article,section,[role="main"]')
+                                  || document.body;
+                }
+
+                // ── collect candidates from the content root ───────────────────
+                const results = [];
+                const seen = new Set();
+
+                // Check ALL descendants — problem rows can be divs or li
+                const candidates = Array.from(contentRoot.querySelectorAll('li,div,span,p'));
+
+                for (const el of candidates) {
+                    // Skip elements with many children — they are container rows
+                    if (el.children.length > 3) continue;
+
+                    const raw = (el.textContent || '').trim()
+                        .replace(/[\n\r\t]+/g, ' ')
+                        .replace(/\s+/g, ' ');
+
+                    if (!raw || raw.length < 3 || raw.length > 60) continue;
+
+                    const lower = raw.toLowerCase();
+
+                    if (SKIP_EXACT.has(lower)) continue;
+                    if (SKIP_PREFIX.some(p => lower.startsWith(p))) continue;
+                    if (SKIP_CONTAINS.some(p => lower.includes(p))) continue;
+
+                    // Must look like a problem title: 1-6 words, each word capitalised
+                    // (LeetCode titles are Title Case)
+                    const words = raw.split(' ');
+                    if (words.length < 1 || words.length > 8) continue;
+                    // At least the first word must start with a letter (not a digit)
+                    if (!/^[A-Za-z]/.test(raw)) continue;
+
+                    if (seen.has(raw)) continue;
+                    seen.add(raw);
+
+                    const html = el.innerHTML || '';
+                    const done = /check|done|complete/i.test(html);
+
+                    // Record a stable CSS selector path so we can re-find the element
+                    // without relying on text matching (which hits sidebar too).
+                    results.push({ title: raw, completed: done });
+                }
+
+                return results;
+            }
+            """,
+            day_num,
+        )
+
+        if not scan_data:
+            return []
+
+        problems = []
+        for p in scan_data:
+            title = p["title"].strip()
+            if not title:
+                continue
+            # Use a scoped locator: prefer items inside the problem-list area
+            # by anchoring to an element that contains ANY text equal to the title
+            # AND is not the sidebar chapter row (sidebar items tend to be preceded
+            # by "DAY" in all-caps just above them).
+            element = self.page.locator(
+                "li, div, span"
+            ).filter(has_text=re.compile(r"^" + re.escape(title) + r"$")).first
+
+            problems.append({
+                "title":      title,
+                "problem_id": _slugify(title),
+                "completed":  p["completed"],
+                "href":       None,
+                "element":    element,
+            })
+        return problems
+
+    def _get_problems_via_vlm(self, day_num: int) -> List[Dict]:
+        """
+        Take a page screenshot and ask the VLM to identify the problem titles
+        visible in the content area. Used when DOM-based detection fails.
+        """
+        import json
+        from src.ai.solver import AIAgent
+
+        try:
+            screenshot = self.page.screenshot()
+            question = (
+                f"This is a screenshot of an online coding platform. "
+                f"Day {day_num} is currently selected in the left sidebar. "
+                f"Look ONLY at the main content panel (right side), NOT the left sidebar. "
+                f"List the coding problem titles shown in that content area. "
+                f"Return ONLY a JSON array of strings, e.g.: "
+                f'["Two Sum", "Reverse String"]. '
+                f"If no problems are visible, return an empty array []."
+            )
+            agent = AIAgent()
+            response = agent.analyze_page(screenshot, question)
+            if not response:
+                return []
+
+            # Extract JSON array from response
+            match = re.search(r'\[.*?\]', response, re.DOTALL)
+            if not match:
+                logger.warning(f"[VLM] Could not parse JSON from response: {response[:200]}")
+                return []
+
+            titles = json.loads(match.group())
+            if not isinstance(titles, list):
+                return []
+
+            problems = []
+            for title in titles:
+                if not isinstance(title, str) or not title.strip():
                     continue
-                if t in seen:
-                    continue
-                seen.add(t)
-                results.append({
+                t = title.strip()
+                problems.append({
                     "title":      t,
                     "problem_id": _slugify(t),
                     "completed":  False,
-                    "element":    li,
+                    "href":       None,
+                    "element":    self.page.locator("li, div, span").filter(
+                                      has_text=re.compile(r"^" + re.escape(t) + r"$")
+                                  ).first,
                 })
-            except Exception:
-                continue
-        return results
+            return problems
+
+        except Exception as e:
+            logger.error(f"[VLM] Screenshot analysis failed: {e}")
+            return []
 
     def click_problem(self, problem: Dict) -> bool:
-        """Click a problem row. Saves the current URL before navigating."""
+        """
+        Open a problem detail page.
+        - If we have an href (from link-based detection), navigate directly.
+        - Otherwise, return to the chapter overview page first so element refs
+          are fresh, then click.
+        Validates the resulting URL has ≥2 UUIDs to confirm it's a problem page.
+        """
         self._current_problem_url = self.page.url
+        href = problem.get("href")
+
         try:
-            problem["element"].click()
+            if href:
+                # Direct navigation — most reliable
+                full_url = href if href.startswith("http") else f"https://www.bytsone.com{href}"
+                self.page.goto(full_url)
+            else:
+                # For DOM-scan elements, ensure we're on the chapter overview page
+                # so element references are valid (not stale)
+                if self._chapter_url and self.page.url != self._chapter_url:
+                    logger.debug(f"Re-navigating to chapter page for fresh element: {self._chapter_url}")
+                    self.page.goto(self._chapter_url)
+                    self.page.wait_for_load_state("load")
+                    self.page.wait_for_timeout(1_500)
+                    # Re-find the element on the refreshed page
+                    title = problem["title"]
+                    problem["element"] = self.page.locator(
+                        "li, div, span"
+                    ).filter(has_text=re.compile(r"^" + re.escape(title) + r"$")).first
+
+                problem["element"].click()
+
             self.page.wait_for_load_state("load")
-            # Give the React SPA extra time to render the problem detail panel
             self.page.wait_for_timeout(2_500)
-            logger.info(f"Opened problem: {problem['title']}  URL: {self.page.url}")
+            final_url = self.page.url
+            logger.info(f"Opened problem: {problem['title']}  URL: {final_url}")
+
+            # Must land on a course problem page (has /course/ in URL with ≥2 UUIDs)
+            if "bytsone.com" not in final_url:
+                logger.error(f"Navigated away from BytsOne: {final_url}")
+                self.page.go_back()
+                self.page.wait_for_load_state("load")
+                return False
+
+            uuid_count = len(re.findall(
+                r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+                final_url, re.I
+            ))
+            if uuid_count < 2:
+                logger.error(
+                    f"URL doesn't look like a problem page ({uuid_count} UUID): {final_url}"
+                )
+                self.page.go_back()
+                self.page.wait_for_load_state("load")
+                return False
+
+            self._current_problem_url = final_url   # update to actual deep URL
             return True
+
         except Exception as e:
-            logger.error(f"Could not click problem '{problem['title']}': {e}")
+            logger.error(f"Could not open problem '{problem['title']}': {e}")
             return False
 
     # ── 4. Take Challenge ──────────────────────────────────────────────────────

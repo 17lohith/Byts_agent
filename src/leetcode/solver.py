@@ -15,6 +15,27 @@ from src.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+# ── Hardcoded fall-back solutions (slugs that produced compile errors from scraping) ──
+KNOWN_SOLUTIONS: dict[str, str] = {
+    "modify-the-matrix": """
+class Solution {
+    public int[][] modifyMatrix(int[][] matrix) {
+        int m = matrix.length, n = matrix[0].length;
+        for (int j = 0; j < n; j++) {
+            int max = Integer.MIN_VALUE;
+            for (int i = 0; i < m; i++)
+                if (matrix[i][j] != -1 && matrix[i][j] > max)
+                    max = matrix[i][j];
+            for (int i = 0; i < m; i++)
+                if (matrix[i][j] == -1)
+                    matrix[i][j] = max;
+        }
+        return matrix;
+    }
+}
+""",
+}
+
 
 class LeetCodeSolver:
     def __init__(self, page: Page):
@@ -128,6 +149,12 @@ class LeetCodeSolver:
         Try scraping first. If scraping returns nothing, use AI to generate.
         Returns validated Java code or None.
         """
+        # Check hardcoded known-good solutions first (avoids scraping broken ones)
+        if slug in KNOWN_SOLUTIONS:
+            code = KNOWN_SOLUTIONS[slug].strip()
+            logger.info(f"[AGENT] Using hardcoded solution for '{slug}' ({len(code)} chars) ✅")
+            return code
+
         logger.info("[AGENT] Phase 1 — trying web scraping…")
         code = self.scraper.get_best_solution()
         if code:

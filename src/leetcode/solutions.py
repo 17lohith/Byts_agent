@@ -173,9 +173,15 @@ class LeetCodeSolutionScraper:
             new_url = f"{current_url}?languageTags={lang_param}"
 
         logger.debug(f"Applying language filter via URL: {new_url}")
-        self.page.goto(new_url)
-        self.page.wait_for_load_state("load")
-        self.page.wait_for_timeout(1_000)
+        for _attempt in range(3):
+            try:
+                self.page.goto(new_url)
+                self.page.wait_for_load_state("load")
+                self.page.wait_for_timeout(1_000)
+                break
+            except Exception as e:
+                logger.warning(f"Language filter nav failed (attempt {_attempt+1}): {e}")
+                self.page.wait_for_timeout(3_000)
         logger.debug(f"Language filter set to {language} ✅")
 
     def _extract_code_from_solution_page(self) -> Optional[str]:

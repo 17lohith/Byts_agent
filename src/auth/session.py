@@ -78,6 +78,10 @@ def ensure_leetcode_login(page: Page, leetcode_url: str, email: str,
         return _wait_for_leetcode_manual_login(page, login_wait_timeout)
     else:
         logger.info("LeetCode session expired — attempting auto re-login …")
+        # Navigate to the login page so the Google button is visible
+        page.goto("https://leetcode.com/accounts/login/")
+        page.wait_for_load_state("load")
+        page.wait_for_timeout(2_000)
         ok = handle_google_relogin(page, expected_email=email, site_name="LeetCode")
         if ok:
             page.wait_for_load_state("load")
