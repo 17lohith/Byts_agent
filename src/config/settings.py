@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     # Which courses to process — comma-separated: "class_problems,task_problems"
     courses_order: str = "class_problems,task_problems"
 
+    # Date fragment used to disambiguate when multiple batches of the same course exist
+    # e.g. "9-3-2026" will prefer the card whose text contains that date string
+    course_date_hint: str = "9-3-2026"
+
     # Account emails
     bytesone_email: str = ""
     leetcode_email: str = ""

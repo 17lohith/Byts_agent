@@ -1,5 +1,6 @@
-"""Playwright browser — attaches to your existing Brave session via CDP."""
+"""Playwright browser — launches Chromium with a persistent profile."""
 
+import os
 from playwright.sync_api import sync_playwright, BrowserContext, Page
 
 from src.utils.logger import setup_logger
@@ -16,30 +17,44 @@ class BrowserManager:
         self.page: Page = None
 
     def start(self):
-        logger.info(f"Attaching to Brave at {self.settings.cdp_url} …")
+        logger.info("Launching Playwright Chromium (persistent context) …")
         self._playwright = sync_playwright().start()
 
-        try:
-            browser = self._playwright.chromium.connect_over_cdp(self.settings.cdp_url)
-        except Exception:
-            raise RuntimeError(
-                f"\n❌ Could not connect to Brave at {self.settings.cdp_url}\n"
-                "Make sure Brave is running with remote debugging:\n\n"
-                '  open -a "Brave Browser" --args --remote-debugging-port=9222\n'
-            )
+        profile_dir = os.path.abspath(self.settings.browser_profile_dir)
+        if os.path.exists(profile_dir):
+            logger.info("Persistent profile found — existing session will be reused")
+        else:
+            logger.info("No profile found — fresh browser (you will need to log in)")
 
-        self._context = browser.contexts[0]
-        # Reuse the active tab if one exists, otherwise open a new one
-        self.page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        self._context = self._playwright.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
+            headless=self.settings.headless,
+            slow_mo=self.settings.slow_mo,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
         self._context.set_default_timeout(self.settings.page_timeout)
         self._context.set_default_navigation_timeout(self.settings.navigation_timeout)
-        logger.info("Connected to Brave ✅  (your existing session will be used)")
+
+        self.page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        logger.info("Browser ready ✅")
+
+    def save_session(self):
+        try:
+            self._context.storage_state(path=self.settings.session_file)
+            logger.info(f"Session saved → {self.settings.session_file}")
+        except Exception as e:
+            logger.warning(f"Could not save session: {e}")
 
     def stop(self):
-        # Never close the user's Brave — just detach
-        if self._playwright:
+        try:
+            self._context.close()
+        except Exception:
+            pass
+        try:
             self._playwright.stop()
-        logger.info("Detached from Brave")
+        except Exception:
+            pass
+        logger.info("Browser closed")
 
     def __enter__(self):
         self.start()
